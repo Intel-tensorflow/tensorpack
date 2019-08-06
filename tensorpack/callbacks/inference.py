@@ -7,10 +7,10 @@ from abc import ABCMeta
 import six
 from six.moves import zip
 
-from .base import Callback
-from ..utils import logger
-from ..utils.stats import RatioCounter, BinaryStatistics
 from ..tfutils.common import get_op_tensor_name
+from ..utils import logger
+from ..utils.stats import BinaryStatistics, RatioCounter
+from .base import Callback
 
 __all__ = ['ScalarStats', 'Inferencer',
            'ClassificationError', 'BinaryClassificationStats']
@@ -19,7 +19,16 @@ __all__ = ['ScalarStats', 'Inferencer',
 @six.add_metaclass(ABCMeta)
 class Inferencer(Callback):
     """ Base class of Inferencer.
-    Inferencer is a special kind of callback that should be called by :class:`InferenceRunner`. """
+    Inferencer is a special kind of callback that should be called by :class:`InferenceRunner`.
+    It has the methods ``_get_fetches`` and ``_on_fetches`` which are like
+    :class:`SessionRunHooks`, except that they will be used only by :class:`InferenceRunner`.
+
+    .. document private functions
+    .. automethod:: _before_inference
+    .. automethod:: _after_inference
+    .. automethod:: _get_fetches
+    .. automethod:: _on_fetches
+    """
 
     def _before_epoch(self):
         self._before_inference()
@@ -58,6 +67,9 @@ class Inferencer(Callback):
         return [get_op_tensor_name(n)[1] for n in ret]
 
     def _get_fetches(self):
+        """
+        To be implemented by subclasses
+        """
         raise NotImplementedError()
 
     def on_fetches(self, results):
@@ -71,6 +83,9 @@ class Inferencer(Callback):
         self._on_fetches(results)
 
     def _on_fetches(self, results):
+        """
+        To be implemented by subclasses
+        """
         raise NotImplementedError()
 
 
@@ -78,6 +93,9 @@ class ScalarStats(Inferencer):
     """
     Statistics of some scalar tensor.
     The value will be averaged over all given datapoints.
+
+    Note that the average of accuracy over all batches is not necessarily the
+    accuracy of the whole dataset. See :class:`ClassificationError` for details.
     """
 
     def __init__(self, names, prefix='validation'):
@@ -117,14 +135,14 @@ class ScalarStats(Inferencer):
 
 class ClassificationError(Inferencer):
     """
-    Compute __true__ classification error in batch mode, from a ``wrong`` tensor.
+    Compute **true** classification error in batch mode, from a ``wrong`` tensor.
 
     The ``wrong`` tensor is supposed to be an binary vector containing
     whether each sample in the batch is *incorrectly* classified.
     You can use ``tf.nn.in_top_k`` to produce this vector.
 
     This Inferencer produces the "true" error, which could be different from
-    `ScalarStats('error_rate')`.
+    ``ScalarStats('error_rate')``.
     It takes account of the fact that batches might not have the same size in
     testing (because the size of test set might not be a multiple of batch size).
     Therefore the result can be different from averaging the error rate of each batch.

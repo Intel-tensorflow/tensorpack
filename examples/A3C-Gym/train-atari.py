@@ -3,29 +3,27 @@
 # File: train-atari.py
 # Author: Yuxin Wu
 
-import numpy as np
-import sys
-import os
-import uuid
 import argparse
-
 import cv2
-import tensorflow as tf
+import gym
+import multiprocessing as mp
+import numpy as np
+import os
 import six
+import sys
+import uuid
+import tensorflow as tf
 from six.moves import queue
 
-
 from tensorpack import *
-from tensorpack.utils.concurrency import ensure_proc_terminate, start_proc_mask_signal
-from tensorpack.utils.serialize import dumps
 from tensorpack.tfutils.gradproc import MapGradient, SummaryGradient
+from tensorpack.utils.concurrency import ensure_proc_terminate, start_proc_mask_signal
 from tensorpack.utils.gpu import get_num_gpu
+from tensorpack.utils.serialize import dumps
 
-
-import gym
-from simulator import SimulatorProcess, SimulatorMaster, TransitionExperience
+from atari_wrapper import FireResetEnv, FrameStack, LimitLength, MapState
 from common import Evaluator, eval_model_multithread, play_n_episodes
-from atari_wrapper import MapState, FrameStack, FireResetEnv, LimitLength
+from simulator import SimulatorMaster, SimulatorProcess, TransitionExperience
 
 if six.PY3:
     from concurrent import futures
@@ -36,16 +34,15 @@ else:
 IMAGE_SIZE = (84, 84)
 FRAME_HISTORY = 4
 GAMMA = 0.99
-CHANNEL = FRAME_HISTORY * 3
-IMAGE_SHAPE3 = IMAGE_SIZE + (CHANNEL,)
+STATE_SHAPE = IMAGE_SIZE + (3, )
 
 LOCAL_TIME_MAX = 5
 STEPS_PER_EPOCH = 6000
 EVAL_EPISODE = 50
 BATCH_SIZE = 128
-PREDICT_BATCH_SIZE = 15     # batch for efficient forward
-SIMULATOR_PROC = 50
-PREDICTOR_THREAD_PER_GPU = 3
+PREDICT_BATCH_SIZE = 16     # batch for efficient forward
+SIMULATOR_PROC = mp.cpu_count() * 2
+PREDICTOR_THREAD_PER_GPU = 4
 PREDICTOR_THREAD = None
 
 NUM_ACTIONS = None
@@ -72,13 +69,17 @@ class MySimulatorWorker(SimulatorProcess):
 class Model(ModelDesc):
     def inputs(self):
         assert NUM_ACTIONS is not None
-        return [tf.placeholder(tf.uint8, (None,) + IMAGE_SHAPE3, 'state'),
+        return [tf.placeholder(tf.uint8, (None,) + STATE_SHAPE + (FRAME_HISTORY, ), 'state'),
                 tf.placeholder(tf.int64, (None,), 'action'),
                 tf.placeholder(tf.float32, (None,), 'futurereward'),
                 tf.placeholder(tf.float32, (None,), 'action_prob'),
                 ]
 
-    def _get_NN_prediction(self, image):
+    def _get_NN_prediction(self, state):
+        assert state.shape.rank == 5  # Batch, H, W, Channel, History
+        state = tf.transpose(state, [0, 1, 2, 4, 3])  # swap channel & history, to be compatible with old models
+        image = tf.reshape(state, [-1] + list(STATE_SHAPE[:2]) + [STATE_SHAPE[2] * FRAME_HISTORY])
+
         image = tf.cast(image, tf.float32) / 255.0
         with argscope(Conv2D, activation=tf.nn.relu):
             l = Conv2D('conv0', image, 32, 5)
@@ -130,7 +131,7 @@ class Model(ModelDesc):
         lr = tf.get_variable('learning_rate', initializer=0.001, trainable=False)
         opt = tf.train.AdamOptimizer(lr, epsilon=1e-3)
 
-        gradprocs = [MapGradient(lambda grad: tf.clip_by_average_norm(grad, 0.1)),
+        gradprocs = [MapGradient(lambda grad: tf.clip_by_norm(grad, 0.1 * tf.cast(tf.size(grad), tf.float32))),
                      SummaryGradient()]
         opt = optimizer.apply_grad_processors(opt, gradprocs)
         return opt
@@ -209,6 +210,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 
 
 def train():
+    assert tf.test.is_gpu_available(), "Training requires GPUs!"
     dirname = os.path.join('train_log', 'train-atari-{}'.format(ENV_NAME))
     logger.set_logger_dir(dirname)
 
@@ -262,7 +264,7 @@ def train():
         session_init=get_model_loader(args.load) if args.load else None,
         max_epoch=1000,
     )
-    trainer = SimpleTrainer() if config.nr_tower == 1 else AsyncMultiGPUTrainer(train_tower)
+    trainer = SimpleTrainer() if num_gpu == 1 else AsyncMultiGPUTrainer(train_tower)
     launch_train_with_config(config, trainer)
 
 
@@ -278,9 +280,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     ENV_NAME = args.env
-    logger.info("Environment Name: {}".format(ENV_NAME))
     NUM_ACTIONS = get_player().action_space.n
-    logger.info("Number of actions: {}".format(NUM_ACTIONS))
+    logger.info("Environment: {}, number of actions: {}".format(ENV_NAME, NUM_ACTIONS))
 
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu

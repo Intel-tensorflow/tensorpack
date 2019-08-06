@@ -2,18 +2,17 @@
 # File: batch_norm.py
 
 
-import tensorflow as tf
-from tensorflow.contrib.framework import add_model_variable
-from tensorflow.python.training import moving_averages
 import re
 import six
+import tensorflow as tf
+from tensorflow.python.training import moving_averages
 
+from ..tfutils.collection import backup_collection, restore_collection
+from ..tfutils.common import get_tf_version_tuple
+from ..tfutils.tower import get_current_tower_context
 from ..utils import logger
 from ..utils.argtools import get_data_format
-from ..tfutils.tower import get_current_tower_context
-from ..tfutils.common import get_tf_version_number
-from ..tfutils.collection import backup_collection, restore_collection
-from .common import layer_register, VariableHolder
+from .common import VariableHolder, layer_register
 from .tflayer import convert_to_tflayer_args, rename_get_variable
 
 __all__ = ['BatchNorm', 'BatchRenorm']
@@ -41,7 +40,7 @@ def get_bn_variables(n_out, use_scale, use_bias, beta_init, gamma_init):
 
 
 def update_bn_ema(xn, batch_mean, batch_var,
-                  moving_mean, moving_var, decay, internal_update):
+                  moving_mean, moving_var, decay):
     update_op1 = moving_averages.assign_moving_average(
         moving_mean, batch_mean, decay, zero_debias=False,
         name='mean_ema_op')
@@ -49,12 +48,10 @@ def update_bn_ema(xn, batch_mean, batch_var,
         moving_var, batch_var, decay, zero_debias=False,
         name='var_ema_op')
 
-    if internal_update:
-        with tf.control_dependencies([update_op1, update_op2]):
-            return tf.identity(xn, name='output')
-    else:
-        tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_op1)
-        tf.add_to_collection(tf.GraphKeys.UPDATE_OPS, update_op2)
+    # When sync_statistics is True, always enable internal_update.
+    # Otherwise the update ops (only executed on main tower)
+    # will hang when some BatchNorm layers are unused (https://github.com/tensorpack/tensorpack/issues/1078)
+    with tf.control_dependencies([update_op1, update_op2]):
         return tf.identity(xn, name='output')
 
 
@@ -83,19 +80,24 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
     1. Accepts an alternative `data_format` option when `axis` is None. For 2D input, this argument will be ignored.
     2. Default value for `momentum` and `epsilon` is different.
     3. Default value for `training` is automatically obtained from tensorpack's `TowerContext`, but can be overwritten.
-    4. Support the `internal_update` option, which enables the use of BatchNorm layer inside conditionals.
+    4. Support the `internal_update` option, which cover more use cases than the standard collection-based update.
     5. Support the `sync_statistics` option, which is very useful in small-batch models.
 
     Args:
         internal_update (bool): if False, add EMA update ops to
           `tf.GraphKeys.UPDATE_OPS`. If True, update EMA inside the layer by control dependencies.
-          They are very similar in speed, but `internal_update=True` can be used
-          when you have conditionals in your model, or when you have multiple networks to train.
-          Corresponding TF issue: https://github.com/tensorflow/tensorflow/issues/14699
-        sync_statistics (str or None): one of None "nccl", or "horovod".
+          They are very similar in speed, but `internal_update=True` is recommended and can be helpful when:
 
-          By default (None), it uses statistics of the input tensor to normalize.
-          This is the standard way BatchNorm was done in most frameworks.
+          1. BatchNorm is used inside dynamic control flow.
+             The collection-based update does not support dynamic control flows.
+          2. BatchNorm layer is sometimes unused (e.g., when you have two networks to train alternatively).
+             Putting all update ops into a single collection will waste a lot of compute.
+
+          Corresponding TF issue: https://github.com/tensorflow/tensorflow/issues/14699
+        sync_statistics (str or None): one of None, "nccl", or "horovod".
+
+          By default (None), it uses statistics of the input tensor to normalize during training.
+          This is the standard way BatchNorm was implemented in most frameworks.
 
           When set to "nccl", this layer must be used under tensorpack's multi-GPU trainers.
           It uses the aggregated statistics of the whole batch (across all GPUs) to normalize.
@@ -104,14 +106,27 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
           It uses the aggregated statistics of the whole batch (across all MPI ranks) to normalize.
           Note that on single machine this is significantly slower than the "nccl" implementation.
 
-          This implementation averages the per-GPU E[x] and E[x^2] among GPUs to compute
+          When enabled, per-GPU E[x] and E[x^2] among all GPUs are averaged to compute
           global mean & variance. Therefore each GPU needs to have the same batch size.
 
-          This option has no effect when not training.
+          The synchronization is based on the current variable scope + the name of the layer
+          (`BatchNorm('name', input)`). Therefore, you need to make sure that:
+
+          1. The BatchNorm layer on different GPUs needs to have the same name, so that
+             statistics can be synchronized. If names do not match, this layer will hang.
+          2. Different BatchNorm layers in one tower cannot share the same name.
+          3. A BatchNorm layer needs to be executed for the same number of times by all GPUs.
+             If different GPUs execute one BatchNorm layer for different number of times
+             (e.g., if some GPUs do not execute it), this layer may hang.
+
+          This option only has effect when `training == get_current_tower_context().training == True`.
 
           This option is also known as "Cross-GPU BatchNorm" as mentioned in:
           `MegDet: A Large Mini-Batch Object Detector <https://arxiv.org/abs/1711.07240>`_.
           Corresponding TF issue: https://github.com/tensorflow/tensorflow/issues/18222.
+
+          When `sync_statistics` is enabled, `internal_update` will be set to True automatically.
+          This is to avoid running `UPDATE_OPS`, which requires synchronization.
 
     Variable Names:
 
@@ -132,7 +147,7 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
           this case.
     """
     # parse shapes
-    data_format = get_data_format(data_format, tfmode=False)
+    data_format = get_data_format(data_format, keras_mode=False)
     shape = inputs.get_shape().as_list()
     ndims = len(shape)
     assert ndims in [2, 4], ndims
@@ -142,12 +157,10 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
 
     if axis is None:
         if ndims == 2:
-            data_format = 'NHWC'
             axis = 1
         else:
             axis = 1 if data_format == 'NCHW' else 3
-    else:
-        data_format = 'NCHW' if axis == 1 else 'NHWC'
+    assert axis in [1, 3], axis
     num_chan = shape[axis]
 
     # parse training/ctx
@@ -155,11 +168,11 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
     if training is None:
         training = ctx.is_training
     training = bool(training)
-    TF_version = get_tf_version_number()
-    if not training and ctx.is_training:
-        assert TF_version >= 1.4, \
-            "Fine tuning a BatchNorm model with fixed statistics is only " \
-            "supported after https://github.com/tensorflow/tensorflow/pull/12580 "
+    TF_version = get_tf_version_tuple()
+    freeze_bn_backward = not training and ctx.is_training
+    if freeze_bn_backward:
+        assert TF_version >= (1, 4), \
+            "Fine tuning a BatchNorm model with fixed statistics needs TF>=1.4!"
         if ctx.is_main_training_tower:  # only warn in first tower
             logger.warn("[BatchNorm] Using moving_mean/moving_variance in training.")
         # Using moving_mean/moving_variance in training, which means we
@@ -169,19 +182,25 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
         coll_bk = backup_collection([tf.GraphKeys.UPDATE_OPS])
         with rename_get_variable(
                 {'moving_mean': 'mean/EMA',
-                 'moving_variance': 'variance/EMA'}):
+                    'moving_variance': 'variance/EMA'}):
             tf_args = dict(
                 axis=axis,
                 momentum=momentum, epsilon=epsilon,
                 center=center, scale=scale,
                 beta_initializer=beta_initializer,
                 gamma_initializer=gamma_initializer,
-                fused=(ndims == 4 and axis in [1, 3]),
+                # https://github.com/tensorflow/tensorflow/issues/10857#issuecomment-410185429
+                fused=(ndims == 4 and axis in [1, 3] and not freeze_bn_backward),
                 _reuse=tf.get_variable_scope().reuse)
-            if TF_version >= 1.5:
+            if TF_version >= (1, 5):
                 tf_args['virtual_batch_size'] = virtual_batch_size
             else:
                 assert virtual_batch_size is None, "Feature not supported in this version of TF!"
+            use_fp16 = inputs.dtype == tf.float16
+            if use_fp16:
+                # non-fused does not support fp16; fused does not support all layouts.
+                # we made our best guess here
+                tf_args['fused'] = True
             layer = tf.layers.BatchNormalization(**tf_args)
             xn = layer.apply(inputs, training=training, scope=tf.get_variable_scope())
 
@@ -189,7 +208,8 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
         # because during training, EMA isn't used
         if ctx.is_main_training_tower:
             for v in layer.non_trainable_variables:
-                add_model_variable(v)
+                if isinstance(v, tf.Variable):
+                    tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, v)
         if not ctx.is_main_training_tower or internal_update:
             restore_collection(coll_bk)
 
@@ -220,16 +240,25 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
         batch_mean_square = tf.reduce_mean(tf.square(inputs), axis=red_axis)
 
         if sync_statistics == 'nccl':
-            if six.PY3 and TF_version <= 1.9 and ctx.is_main_training_tower:
-                logger.warn("A TensorFlow bug will cause cross-GPU BatchNorm to fail. "
-                            "Apply this patch: https://github.com/tensorflow/tensorflow/pull/20360")
-
-            from tensorflow.contrib.nccl.ops import gen_nccl_ops
-            shared_name = re.sub('tower[0-9]+/', '', tf.get_variable_scope().name)
             num_dev = ctx.total
             if num_dev == 1:
                 logger.warn("BatchNorm(sync_statistics='nccl') is used with only one tower!")
             else:
+                assert six.PY2 or TF_version >= (1, 10), \
+                    "Cross-GPU BatchNorm is only supported in TF>=1.10 ." \
+                    "Upgrade TF or apply this patch manually: https://github.com/tensorflow/tensorflow/pull/20360"
+
+                if TF_version <= (1, 12):
+                    try:
+                        from tensorflow.contrib.nccl.python.ops.nccl_ops import _validate_and_load_nccl_so
+                    except Exception:
+                        pass
+                    else:
+                        _validate_and_load_nccl_so()
+                    from tensorflow.contrib.nccl.ops import gen_nccl_ops
+                else:
+                    from tensorflow.python.ops import gen_nccl_ops
+                shared_name = re.sub('tower[0-9]+/', '', tf.get_variable_scope().name)
                 batch_mean = gen_nccl_ops.nccl_all_reduce(
                     input=batch_mean,
                     reduction='sum',
@@ -243,8 +272,15 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
         elif sync_statistics == 'horovod':
             # Require https://github.com/uber/horovod/pull/331
             import horovod.tensorflow as hvd
-            batch_mean = hvd.allreduce(batch_mean, average=True)
-            batch_mean_square = hvd.allreduce(batch_mean_square, average=True)
+            if hvd.size() == 1:
+                logger.warn("BatchNorm(sync_statistics='horovod') is used with only one process!")
+            else:
+                import horovod
+                hvd_version = tuple(map(int, horovod.__version__.split('.')))
+                assert hvd_version >= (0, 13, 6), "sync_statistics=horovod needs horovod>=0.13.6 !"
+
+                batch_mean = hvd.allreduce(batch_mean, average=True)
+                batch_mean_square = hvd.allreduce(batch_mean_square, average=True)
         batch_var = batch_mean_square - tf.square(batch_mean)
         batch_mean_vec = batch_mean
         batch_var_vec = batch_var
@@ -267,8 +303,7 @@ def BatchNorm(inputs, axis=None, training=None, momentum=0.9, epsilon=1e-5,
 
         if ctx.is_main_training_tower:
             ret = update_bn_ema(
-                xn, batch_mean_vec, batch_var_vec, moving_mean, moving_var,
-                momentum, internal_update)
+                xn, batch_mean_vec, batch_var_vec, moving_mean, moving_var, momentum)
         else:
             ret = tf.identity(xn, name='output')
 
@@ -345,7 +380,8 @@ def BatchRenorm(x, rmax, dmax, momentum=0.9, epsilon=1e-5,
 
     if ctx.is_main_training_tower:
         for v in layer.non_trainable_variables:
-            add_model_variable(v)
+            if isinstance(v, tf.Variable):
+                tf.add_to_collection(tf.GraphKeys.MODEL_VARIABLES, v)
     else:
         # only run UPDATE_OPS in the first tower
         restore_collection(coll_bk)

@@ -1,21 +1,18 @@
 # -*- coding: utf-8 -*-
 # File: sessinit.py
 
-
 import os
 import numpy as np
-import tensorflow as tf
 import six
+import tensorflow as tf
 
 from ..utils import logger
-from ..utils.develop import deprecated
 from .common import get_op_tensor_name
-from .varmanip import (SessionUpdate, get_savename_from_varname,
-                       is_training_name, get_checkpoint_path)
+from .varmanip import SessionUpdate, get_checkpoint_path, get_savename_from_varname, is_training_name
 
 __all__ = ['SessionInit', 'ChainInit',
            'SaverRestore', 'SaverRestoreRelaxed', 'DictRestore',
-           'JustCurrentSession', 'get_model_loader', 'TryResumeTraining']
+           'JustCurrentSession', 'get_model_loader']
 
 
 class SessionInit(object):
@@ -82,7 +79,7 @@ class MismatchLogger(object):
         self._names = []
 
     def add(self, name):
-        self._names.append(name)
+        self._names.append(get_op_tensor_name(name)[0])
 
     def log(self):
         if len(self._names):
@@ -140,9 +137,9 @@ class SaverRestore(SessionInit):
                     func(reader, name, v)
                     chkpt_vars_used.add(name)
                 else:
-                    vname = v.op.name
-                    if not is_training_name(vname):
-                        mismatch.add(vname)
+                    # use tensor name (instead of op name) for logging, to be consistent with the reverse case
+                    if not is_training_name(v.name):
+                        mismatch.add(v.name)
         mismatch.log()
         mismatch = MismatchLogger('checkpoint', 'graph')
         if len(chkpt_vars_used) < len(chkpt_vars):
@@ -177,7 +174,8 @@ class SaverRestoreRelaxed(SaverRestore):
 
         def f(reader, name, v):
             val = reader.get_tensor(name)
-            SessionUpdate.load_value_to_var(v, val)
+            v.load(SessionUpdate.relaxed_value_for_var(val, v))
+
         with sess.as_default():
             self._match_vars(f)
 
@@ -217,12 +215,13 @@ class DictRestore(SessionInit):
         mismatch.log()
 
         upd = SessionUpdate(sess, [v for v in variables if v.name in intersect])
-        logger.info("Restoring from dict ...")
+        logger.info("Restoring {} variables from dict ...".format(len(intersect)))
         upd.update({name: value for name, value in six.iteritems(self._prms) if name in intersect})
 
 
 class ChainInit(SessionInit):
-    """ Initialize a session by a list of :class:`SessionInit` instance, executed one by one.
+    """
+    Initialize a session by a list of :class:`SessionInit` instance, executed one by one.
     This can be useful for, e.g., loading several models from different files
     to form a composition of models.
     """
@@ -251,6 +250,8 @@ def get_model_loader(filename):
         SessInit: either a :class:`DictRestore` (if name ends with 'npy/npz') or
         :class:`SaverRestore` (otherwise).
     """
+    assert isinstance(filename, six.string_types), filename
+    filename = os.path.expanduser(filename)
     if filename.endswith('.npy'):
         assert tf.gfile.Exists(filename), filename
         return DictRestore(np.load(filename, encoding='latin1').item())
@@ -260,21 +261,3 @@ def get_model_loader(filename):
         return DictRestore(dict(obj))
     else:
         return SaverRestore(filename)
-
-
-@deprecated("It's better to write the logic yourself or use AutoResumeTrainConfig!", "2018-07-01")
-def TryResumeTraining():
-    """
-    Try loading latest checkpoint from ``logger.get_logger_dir()``, only if there is one.
-    Actually not very useful... better to write your own one.
-
-    Returns:
-        SessInit: either a :class:`JustCurrentSession`, or a :class:`SaverRestore`.
-    """
-    if not logger.get_logger_dir():
-        return JustCurrentSession()
-    path = os.path.join(logger.get_logger_dir(), 'checkpoint')
-    if not tf.gfile.Exists(path):
-        return JustCurrentSession()
-    logger.info("Found checkpoint at {}.".format(path))
-    return SaverRestore(path)

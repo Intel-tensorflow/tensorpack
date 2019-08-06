@@ -2,16 +2,15 @@
 # File: utils.py
 
 
-from contextlib import contextmanager
 import operator
+from contextlib import contextmanager
 import tensorflow as tf
 
+from ..tfutils.common import get_tf_version_tuple
+from ..tfutils.scope_utils import cached_name_scope, under_name_scope
 from ..tfutils.varreplace import custom_getter_scope
-from ..tfutils.scope_utils import under_name_scope, cached_name_scope
-from ..tfutils.common import get_tf_version_number
-from ..utils.argtools import call_only_once
 from ..utils import logger
-
+from ..utils.argtools import call_only_once
 
 __all__ = ['LeastLoadedDeviceSetter',
            'OverrideCachingDevice',
@@ -41,6 +40,10 @@ def _replace_global_by_local(kwargs):
 
 @contextmanager
 def override_to_local_variable(enable=True):
+    """
+    Returns:
+        a context where all variables will be created as local.
+    """
     if enable:
 
         def custom_getter(getter, name, *args, **kwargs):
@@ -55,7 +58,16 @@ def override_to_local_variable(enable=True):
 
 # https://github.com/tensorflow/benchmarks/blob/48cbef14a592e02a14beee8e9aef3ad22cadaed1/scripts/tf_cnn_benchmarks/variable_mgr_util.py#L192-L218
 class LeastLoadedDeviceSetter(object):
-    """ Helper class to assign variables on the least loaded ps-device."""
+    """
+    Helper class to assign variables on the least loaded ps-device.
+
+    Usage:
+
+        .. code-block:: python
+
+            with tf.device(LeastLoadedDeviceSetter(...)):
+                ...
+    """
     def __init__(self, worker_device, ps_devices):
         """
         Args:
@@ -67,11 +79,10 @@ class LeastLoadedDeviceSetter(object):
         self.ps_sizes = [0] * len(self.ps_devices)
 
     def __call__(self, op):
-        if get_tf_version_number() >= 1.8:
-            from tensorflow.python.training.device_util import canonicalize
-        else:
-            def canonicalize(name):    # tensorflow/tensorflow#11484
-                return tf.DeviceSpec.from_string(name).to_string()
+        # from tensorflow.python.training.device_util import canonicalize
+        # from tensorflow.python.distribute.device_util import canonicalize
+        def canonicalize(name):    # tensorflow/tensorflow#11484
+            return tf.DeviceSpec.from_string(name).to_string()
 
         if op.device:
             return op.device
@@ -135,7 +146,11 @@ def allreduce_grads(all_grads, average):
     Returns:
         K x N: same as input, but each grad is replaced by the average over K devices.
     """
-    from tensorflow.contrib import nccl
+
+    if get_tf_version_tuple() <= (1, 12):
+        from tensorflow.contrib import nccl
+    else:
+        from tensorflow.python.ops import nccl_ops as nccl
     nr_tower = len(all_grads)
     if nr_tower == 1:
         return all_grads
@@ -343,7 +358,7 @@ class GradientPacker(object):
         split_size_last = self._total_size - split_size * (self._num_split - 1)
         self._split_sizes = [split_size] * (self._num_split - 1) + [split_size_last]
         logger.info(
-            "Will pack {} gradients of total number={} into {} splits.".format(
+            "Will pack {} gradients of total dimension={} into {} splits.".format(
                 len(self._sizes), self._total_size, self._num_split))
         return True
 

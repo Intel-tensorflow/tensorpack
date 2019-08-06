@@ -11,10 +11,11 @@ the only differences are:
 """
 
 
-from tensorpack import *
-from tensorpack.dataflow import dataset
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+
+from tensorpack import *
+from tensorpack.dataflow import dataset
 
 IMAGE_SIZE = 28
 
@@ -46,7 +47,7 @@ class Model(ModelDesc):
         cost = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')
 
-        acc = tf.to_float(tf.nn.in_top_k(logits, label, 1))
+        acc = tf.cast(tf.nn.in_top_k(logits, label, 1), tf.float32)
 
         acc = tf.reduce_mean(acc, name='accuracy')
         summary.add_moving_summary(acc)

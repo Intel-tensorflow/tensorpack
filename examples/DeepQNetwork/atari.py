@@ -4,19 +4,18 @@
 
 import numpy as np
 import os
-import cv2
 import threading
-import six
-from six.moves import range
-from tensorpack.utils import logger
-from tensorpack.utils.utils import get_rng, execute_only_once
-from tensorpack.utils.fs import get_dataset_path
-
+import cv2
 import gym
+import six
+from ale_python_interface import ALEInterface
 from gym import spaces
 from gym.envs.atari.atari_env import ACTION_MEANING
+from six.moves import range
 
-from ale_python_interface import ALEInterface
+from tensorpack.utils import logger
+from tensorpack.utils.fs import get_dataset_path
+from tensorpack.utils.utils import execute_only_once, get_rng
 
 __all__ = ['AtariPlayer']
 
@@ -121,7 +120,7 @@ class AtariPlayer(gym.Env):
                 cv2.waitKey(int(self.viz * 1000))
         ret = ret.astype('float32')
         # 0.299,0.587.0.114. same as rgb2y in torch/image
-        ret = cv2.cvtColor(ret, cv2.COLOR_RGB2GRAY)
+        ret = cv2.cvtColor(ret, cv2.COLOR_RGB2GRAY)[:, :]
         return ret.astype('uint8')  # to save some memory
 
     def _restart_episode(self):
@@ -140,6 +139,9 @@ class AtariPlayer(gym.Env):
         if self.ale.game_over():
             self._restart_episode()
         return self._current_state()
+
+    def render(self, *args, **kwargs):
+        pass  # visualization for this env is through the viz= argument when creating the player
 
     def step(self, act):
         oldlives = self.ale.lives()

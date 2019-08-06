@@ -5,17 +5,15 @@
 
 import numpy as np
 import tensorflow as tf
-
 from tensorflow import keras
-KL = keras.layers
-
 
 from tensorpack import InputDesc, QueueInput
-from tensorpack.dataflow import dataset, BatchData, MapData
-from tensorpack.utils import logger
-from tensorpack.contrib.keras import KerasModel
 from tensorpack.callbacks import ModelSaver
+from tensorpack.contrib.keras import KerasModel
+from tensorpack.dataflow import BatchData, MapData, dataset
+from tensorpack.utils import logger
 
+KL = keras.layers
 IMAGE_SIZE = 28
 
 
@@ -69,7 +67,7 @@ if __name__ == '__main__':
     )
     M.fit(
         validation_data=dataset_test,
-        steps_per_epoch=dataset_train.size(),
+        steps_per_epoch=len(dataset_train),
         callbacks=[
             ModelSaver()
         ]

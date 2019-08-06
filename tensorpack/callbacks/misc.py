@@ -2,14 +2,14 @@
 # File: misc.py
 
 
+import numpy as np
 import os
 import time
 from collections import deque
-import numpy as np
 
-from .base import Callback
-from ..utils.utils import humanize_time_delta
 from ..utils import logger
+from ..utils.utils import humanize_time_delta
+from .base import Callback
 
 __all__ = ['SendStat', 'InjectShell', 'EstimatedTimeLeft']
 
@@ -35,10 +35,20 @@ class InjectShell(Callback):
     """
     Allow users to create a specific file as a signal to pause
     and iteratively debug the training.
-    Once triggered, it detects whether the file exists, and opens an
+    Once the :meth:`trigger` method is called, it detects whether the file exists, and opens an
     IPython/pdb shell if yes.
-    In the shell, `self` is this callback, `self.trainer` is the trainer, and
+    In the shell, ``self`` is this callback, ``self.trainer`` is the trainer, and
     from that you can access everything else.
+
+    Example:
+
+    .. code-block:: none
+
+        callbacks=[InjectShell('/path/to/pause-training.tmp'), ...]
+
+        # the following command will pause the training when the epoch finishes:
+        $ touch /path/to/pause-training.tmp
+
     """
 
     def __init__(self, file='INJECT_SHELL.tmp', shell='ipython'):

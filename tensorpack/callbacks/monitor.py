@@ -2,25 +2,28 @@
 # File: monitor.py
 
 
-import os
+import json
 import numpy as np
+import operator
+import os
+import re
 import shutil
 import time
-from datetime import datetime
-import operator
 from collections import defaultdict
+from datetime import datetime
 import six
-import json
-import re
-
 import tensorflow as tf
+
+from ..libinfo import __git_version__
+from ..tfutils.summary import create_image_summary, create_scalar_summary
 from ..utils import logger
-from ..tfutils.summary import create_scalar_summary, create_image_summary
+from ..utils.develop import HIDE_DOC
 from .base import Callback
 
-__all__ = ['TrainingMonitor', 'Monitors',
+__all__ = ['MonitorBase', 'Monitors',
            'TFEventWriter', 'JSONWriter',
-           'ScalarPrinter', 'SendMonitorData']
+           'ScalarPrinter', 'SendMonitorData',
+           'TrainingMonitor', 'CometMLMonitor']
 
 
 def image_to_nhwc(arr):
@@ -38,9 +41,9 @@ def image_to_nhwc(arr):
     return arr
 
 
-class TrainingMonitor(Callback):
+class MonitorBase(Callback):
     """
-    Monitor a training progress, by processing different types of
+    Base class for monitors which monitor a training progress, by processing different types of
     summary/statistics from trainer.
 
     .. document private functions
@@ -94,7 +97,13 @@ class TrainingMonitor(Callback):
     # TODO process other types
 
 
-class NoOpMonitor(TrainingMonitor):
+TrainingMonitor = MonitorBase
+"""
+Old name
+"""
+
+
+class NoOpMonitor(MonitorBase):
     def __init__(self, name=None):
         self._name = name
 
@@ -109,8 +118,8 @@ class Monitors(Callback):
     Merge monitors together for trainer to use.
 
     In training, each trainer will create a :class:`Monitors` instance,
-    and you can access it through `trainer.monitors`.
-    You should use `trainer.monitors` for logging and it will dispatch your
+    and you can access it through ``trainer.monitors``.
+    You should use ``trainer.monitors`` for logging and it will dispatch your
     logs to each sub-monitor.
     """
 
@@ -120,9 +129,11 @@ class Monitors(Callback):
         self._scalar_history = ScalarHistory()
         self._monitors = monitors + [self._scalar_history]
         for m in self._monitors:
-            assert isinstance(m, TrainingMonitor), m
+            assert isinstance(m, MonitorBase), m
 
     def _setup_graph(self):
+        # scalar_history's other methods were not called.
+        # but they are not useful for now
         self._scalar_history.setup_graph(self.trainer)
 
     def _dispatch(self, func):
@@ -197,8 +208,11 @@ class Monitors(Callback):
 
         If you run multiprocess training, keep in mind that
         the data is perhaps only available on chief process.
+
+        Returns:
+            scalar
         """
-        return self._scalar_history.get_latest(name)
+        return self._scalar_history.get_latest(name)[1]
 
     def get_history(self, name):
         """
@@ -206,11 +220,14 @@ class Monitors(Callback):
 
         If you run multiprocess training, keep in mind that
         the data is perhaps only available on chief process.
+
+        Returns:
+            a list of (global_step, value) pairs: history data for this scalar
         """
         return self._scalar_history.get_history(name)
 
 
-class TFEventWriter(TrainingMonitor):
+class TFEventWriter(MonitorBase):
     """
     Write summaries to TensorFlow event file.
     """
@@ -245,9 +262,11 @@ class TFEventWriter(TrainingMonitor):
             self._logdir, graph=tf.get_default_graph(),
             max_queue=self._max_queue, flush_secs=self._flush_secs)
 
+    @HIDE_DOC
     def process_summary(self, summary):
         self._writer.add_summary(summary, self.global_step)
 
+    @HIDE_DOC
     def process_event(self, evt):
         self._writer.add_event(evt)
 
@@ -261,7 +280,7 @@ class TFEventWriter(TrainingMonitor):
         self._writer.close()
 
 
-class JSONWriter(TrainingMonitor):
+class JSONWriter(MonitorBase):
     """
     Write all scalar data to a json file under ``logger.get_logger_dir()``, grouped by their global step.
     If found an earlier json history file, will append to it.
@@ -306,6 +325,12 @@ class JSONWriter(TrainingMonitor):
         except Exception:
             return None
 
+    # initialize the stats here, because before_train from other callbacks may use it
+    def _setup_graph(self):
+        self._stats = []
+        self._stat_now = {}
+        self._last_gs = -1
+
     def _before_train(self):
         stats = JSONWriter.load_existing_json()
         self._fname = os.path.join(logger.get_logger_dir(), JSONWriter.FILENAME)
@@ -315,30 +340,28 @@ class JSONWriter(TrainingMonitor):
             except Exception:
                 epoch = None
 
+            # check against the current training settings
+            # therefore this logic needs to be in before_train stage
             starting_epoch = self.trainer.loop.starting_epoch
             if epoch is None or epoch == starting_epoch:
                 logger.info("Found existing JSON inside {}, will append to it.".format(logger.get_logger_dir()))
                 self._stats = stats
             else:
                 logger.warn(
-                    "History epoch value {} from JSON is not the predecessor of the starting_epoch value {}".format(
+                    "History epoch={} from JSON is not the predecessor of the current starting_epoch={}".format(
                         epoch - 1, starting_epoch))
                 logger.warn("If you want to resume old training, either use `AutoResumeTrainConfig` "
-                            "or correctly set the starting_epoch yourself to avoid inconsistency. "
-                            "Epoch number will not be automatically loaded by JSONWriter.")
+                            "or correctly set the new starting_epoch yourself to avoid inconsistency. ")
 
                 backup_fname = JSONWriter.FILENAME + '.' + datetime.now().strftime('%m%d-%H%M%S')
                 backup_fname = os.path.join(logger.get_logger_dir(), backup_fname)
 
-                logger.warn("Now, we will start training at epoch {} and backup old json to {}".format(
+                logger.warn("Now, we will train with starting_epoch={} and backup old json to {}".format(
                     self.trainer.loop.starting_epoch, backup_fname))
                 shutil.move(self._fname, backup_fname)
-                self._stats = []
-        else:
-            self._stats = []
-        self._stat_now = {}
 
-        self._last_gs = -1
+        # in case we have something to log here.
+        self._trigger()
 
     def _trigger_step(self):
         # will do this in trigger_epoch
@@ -348,6 +371,7 @@ class JSONWriter(TrainingMonitor):
     def _trigger_epoch(self):
         self._trigger()
 
+    @HIDE_DOC
     def process_scalar(self, name, val):
         self._stat_now[name] = val
 
@@ -374,7 +398,7 @@ class JSONWriter(TrainingMonitor):
             logger.exception("Exception in JSONWriter._write_stat()!")
 
 
-class ScalarPrinter(TrainingMonitor):
+class ScalarPrinter(MonitorBase):
     """
     Print scalar data into terminal.
     """
@@ -404,9 +428,11 @@ class ScalarPrinter(TrainingMonitor):
 
         self._enable_step = enable_step
         self._enable_epoch = enable_epoch
-
-    def _setup_graph(self):
         self._dic = {}
+
+    # in case we have something to log here.
+    def _before_train(self):
+        self._trigger()
 
     def _trigger_step(self):
         if self._enable_step:
@@ -422,6 +448,7 @@ class ScalarPrinter(TrainingMonitor):
         if self._enable_epoch:
             self._trigger()
 
+    @HIDE_DOC
     def process_scalar(self, name, val):
         self._dic[name] = float(val)
 
@@ -441,21 +468,22 @@ class ScalarPrinter(TrainingMonitor):
         self._dic = {}
 
 
-class ScalarHistory(TrainingMonitor):
+class ScalarHistory(MonitorBase):
     """
-    Only used by monitors internally.
+    Only internally used by monitors.
     """
 
-    def _setup_graph(self):
+    def __init__(self):
         self._dic = defaultdict(list)
 
+    @HIDE_DOC
     def process_scalar(self, name, val):
-        self._dic[name].append(float(val))
+        self._dic[name].append((self.global_step, float(val)))
 
     def get_latest(self, name):
         hist = self._dic[name]
         if len(hist) == 0:
-            raise KeyError("Invalid key: {}".format(name))
+            raise KeyError("No available data for the key: {}".format(name))
         else:
             return hist[-1]
 
@@ -463,7 +491,7 @@ class ScalarHistory(TrainingMonitor):
         return self._dic[name]
 
 
-class SendMonitorData(TrainingMonitor):
+class SendMonitorData(MonitorBase):
     """
     Execute a command with some specific scalar monitor data.
     This is useful for, e.g. building a custom statistics monitor.
@@ -493,6 +521,7 @@ class SendMonitorData(TrainingMonitor):
         self.names = names
         self.dic = {}
 
+    @HIDE_DOC
     def process_scalar(self, name, val):
         if name in self.names:
             self.dic[name] = val
@@ -510,3 +539,55 @@ class SendMonitorData(TrainingMonitor):
         if ret != 0:
             logger.error("Command '{}' failed with ret={}!".format(cmd, ret))
         self.dic = {}
+
+
+class CometMLMonitor(MonitorBase):
+    """
+    Send data to https://www.comet.ml.
+
+    Note:
+        1. comet_ml requires you to `import comet_ml` before importing tensorflow or tensorpack.
+        2. The "automatic output logging" feature will make the training progress bar appear to freeze.
+           Therefore the feature is disabled by default.
+    """
+    def __init__(self, experiment=None, api_key=None, tags=None, **kwargs):
+        """
+        Args:
+            experiment (comet_ml.Experiment): if provided, invalidate all other arguments
+            api_key (str): your comet.ml API key
+            tags (list[str]): experiment tags
+            kwargs: other arguments passed to :class:`comet_ml.Experiment`.
+        """
+        if experiment is not None:
+            self._exp = experiment
+            assert api_key is None and tags is None and len(kwargs) == 0
+        else:
+            from comet_ml import Experiment
+            kwargs.setdefault('log_code', True)  # though it's not functioning, git patch logging requires it
+            kwargs.setdefault('auto_output_logging', None)
+            self._exp = Experiment(api_key=api_key, **kwargs)
+            if tags is not None:
+                self._exp.add_tags(tags)
+
+        self._exp.set_code("Code logging is impossible because there are too many files ...")
+        self._exp.log_dependency('tensorpack', __git_version__)
+
+    @property
+    def experiment(self):
+        """
+        The :class:`comet_ml.Experiment` instance.
+        """
+        return self._exp
+
+    def _before_train(self):
+        self._exp.set_model_graph(tf.get_default_graph())
+
+    @HIDE_DOC
+    def process_scalar(self, name, val):
+        self._exp.log_metric(name, val, step=self.global_step)
+
+    def _after_train(self):
+        self._exp.end()
+
+    def _after_epoch(self):
+        self._exp.log_epoch_end(self.epoch_num)

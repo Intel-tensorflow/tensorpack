@@ -5,6 +5,12 @@
 
 import tensorflow as tf
 from tensorflow import keras
+
+from tensorpack import *
+from tensorpack.contrib.keras import KerasPhaseCallback
+from tensorpack.dataflow import dataset
+from tensorpack.utils.argtools import memoized
+
 KL = keras.layers
 
 """
@@ -13,12 +19,6 @@ This way you can define models in Keras-style, and benefit from the more efficei
 
 Note: this example does not work for replicated-style data-parallel trainers.
 """
-
-
-from tensorpack import *
-from tensorpack.dataflow import dataset
-from tensorpack.utils.argtools import memoized
-from tensorpack.contrib.keras import KerasPhaseCallback
 
 IMAGE_SIZE = 28
 
@@ -54,7 +54,7 @@ class Model(ModelDesc):
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')  # the average cross-entropy loss
 
         # for tensorpack validation
-        acc = tf.to_float(tf.nn.in_top_k(logits, label, 1))
+        acc = tf.cast(tf.nn.in_top_k(logits, label, 1), tf.float32)
         acc = tf.reduce_mean(acc, name='accuracy')
         summary.add_moving_summary(acc)
 

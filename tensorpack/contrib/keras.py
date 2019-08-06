@@ -1,27 +1,23 @@
 # -*- coding: utf-8 -*-
 # File: keras.py
 
-import tensorflow as tf
+from contextlib import contextmanager
 import six
+import tensorflow as tf
 from tensorflow import keras
-from tensorflow.python.keras import metrics as metrics_module
 
+from ..callbacks import Callback, CallbackToHook, InferenceRunner, InferenceRunnerBase, ScalarStats
 from ..models.regularize import regularize_cost_from_collection
-from ..train import Trainer, SimpleTrainer, SyncMultiGPUTrainerParameterServer
-from ..train.trainers import DistributedTrainerBase
-from ..train.interface import apply_default_prefetch
-from ..callbacks import (
-    Callback, InferenceRunnerBase, InferenceRunner, CallbackToHook,
-    ScalarStats)
-
-from ..tfutils.common import get_op_tensor_name
 from ..tfutils.collection import backup_collection, restore_collection
-from ..tfutils.tower import get_current_tower_context
+from ..tfutils.common import get_op_tensor_name
 from ..tfutils.scope_utils import cached_name_scope
 from ..tfutils.summary import add_moving_summary
-from ..utils.gpu import get_nr_gpu
+from ..tfutils.tower import get_current_tower_context
+from ..train import SimpleTrainer, SyncMultiGPUTrainerParameterServer, Trainer
+from ..train.interface import apply_default_prefetch
+from ..train.trainers import DistributedTrainerBase
 from ..utils import logger
-
+from ..utils.gpu import get_nr_gpu
 
 __all__ = ['KerasPhaseCallback', 'setup_keras_trainer', 'KerasModel']
 
@@ -38,11 +34,10 @@ def _check_name(tensor, name):
 class KerasModelCaller(object):
     """
     Keras model doesn't support variable scope reuse.
-    This is a hack to mimic reuse.
+    This is a wrapper around keras model to mimic reuse.
     """
     def __init__(self, get_model):
         self.get_model = get_model
-
         self.cached_model = None
 
     def __call__(self, input_tensors):
@@ -72,7 +67,7 @@ class KerasModelCaller(object):
             for n in added_trainable_names:
                 if n not in new_trainable_names:
                     logger.warn("Keras created trainable variable '{}' which is actually not trainable. "
-                                "This was automatically corrected by tensorpack.".format(n))
+                                "This was automatically corrected.".format(n))
 
             # Keras models might not use this collection at all (in some versions).
             # This is a BC-breaking change of tf.keras: https://github.com/tensorflow/tensorflow/issues/19643
@@ -82,7 +77,21 @@ class KerasModelCaller(object):
 
         if self.cached_model is None:
             assert not reuse
-            model = self.cached_model = self.get_model(*input_tensors)
+
+            # starting from some versions, tf.keras starts to prepend name scope to variable names ..
+            @contextmanager
+            def clear_tower0_name_scope():
+                ns = tf.get_default_graph().get_name_scope()
+                if ns == 'tower0':
+                    with tf.name_scope('/'):
+                        yield
+                else:
+                    yield
+
+            with clear_tower0_name_scope():
+                model = self.cached_model = self.get_model(*input_tensors)
+                assert isinstance(model, keras.Model), \
+                    "Your get_model function should return a `tf.keras.Model`!"
             outputs = model.outputs
         elif reuse:
             # use the cached Keras model to mimic reuse
@@ -100,11 +109,16 @@ class KerasModelCaller(object):
         return outputs
 
 
-# Keras needs an extra input if learning_phase is used by the model
-# This cb will be used by
-# 1. trainer with isTrain=True
-# 2. InferenceRunner with isTrain=False, in the form of hooks
 class KerasPhaseCallback(Callback):
+    """
+    Keras needs an extra input if learning_phase is used by the model
+    This callback will be used:
+    1. By the trainer with isTrain=True
+    2. By InferenceRunner with isTrain=False, in the form of hooks
+
+    If you use :class:`KerasModel` or :func:`setup_keras_trainer`,
+    this callback will be automatically added when needed.
+    """
     def __init__(self, isTrain):
         assert isinstance(isTrain, bool), isTrain
         self._isTrain = isTrain
@@ -132,8 +146,9 @@ def setup_keras_trainer(
     """
     Args:
         trainer (SingleCostTrainer):
-        get_model (input1, input2, ... -> keras.model.Model):
-            Takes tensors and returns a Keras model. Will be part of the tower function.
+        get_model (input1, input2, ... -> tf.keras.Model):
+            A function which takes tensors, builds and returns a Keras model.
+            It will be part of the tower function.
         input (InputSource):
         optimizer (tf.train.Optimizer):
         loss, metrics: list of strings
@@ -185,7 +200,7 @@ def setup_keras_trainer(
                 output_tensor = outputs[oid]
                 target_tensor = target_tensors[oid]  # TODO may not have the same mapping?
                 with cached_name_scope('keras_metric', top_level=False):
-                    metric_fn = metrics_module.get(metric_name)
+                    metric_fn = keras.metrics.get(metric_name)
                     metric_tensor = metric_fn(target_tensor, output_tensor)
                 metric_tensor = tf.reduce_mean(metric_tensor, name=metric_name)
                 _check_name(metric_tensor, metric_name)
@@ -200,7 +215,8 @@ def setup_keras_trainer(
         input,
         get_cost,
         lambda: optimizer)
-    if model_caller.cached_model.uses_learning_phase:
+    if len(keras.backend.learning_phase().consumers()) > 0:
+        # check if learning_phase is used in this model
         trainer.register_callback(KerasPhaseCallback(True))
 
 
@@ -209,8 +225,9 @@ class KerasModel(object):
                  input, trainer=None):
         """
         Args:
-            get_model (input1, input2, ... -> keras.model.Model):
-                Takes tensors and returns a Keras model. Will be part of the tower function.
+            get_model (input1, input2, ... -> keras.Model):
+                A function which takes tensors, builds and returns a Keras model.
+                It will be part of the tower function.
             inputs_desc ([InputDesc]):
             targets_desc ([InputDesc]):
             input (InputSource | DataFlow):
@@ -218,6 +235,7 @@ class KerasModel(object):
                 GPUs and use them all.
         """
         self.get_model = get_model
+        assert callable(get_model), get_model
         self.inputs_desc = inputs_desc
         self.targets_desc = targets_desc
         if trainer is None:
@@ -259,10 +277,15 @@ class KerasModel(object):
         """
         Args:
             validation_data (DataFlow or InputSource): to be used for inference.
-            kwargs: same as `self.trainer.train_with_defaults`.
+                The inference callback is added as the first in the callback list.
+                If you need to use it in a different order, please write it in the callback list manually.
+            kwargs: same arguments as :meth:`Trainer.train_with_defaults`.
         """
         callbacks = kwargs.pop('callbacks', [])
         if validation_data is not None:
-            callbacks.append(InferenceRunner(
+            # There is no way to guess where users want this callback. So we have to choose one.
+            # MinSaver may need results from this callback,
+            # so we put this callback at first.
+            callbacks.insert(0, InferenceRunner(
                 validation_data, ScalarStats(self._stats_to_inference)))
         self.trainer.train_with_defaults(callbacks=callbacks, **kwargs)

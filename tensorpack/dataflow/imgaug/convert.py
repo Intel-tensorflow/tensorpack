@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 # File: convert.py
 
-from .base import ImageAugmentor
-from .meta import MapImage
 import numpy as np
 import cv2
+
+from .base import ImageAugmentor
+from .meta import MapImage
 
 __all__ = ['ColorSpace', 'Grayscale', 'ToUint8', 'ToFloat32']
 
@@ -15,7 +16,7 @@ class ColorSpace(ImageAugmentor):
     def __init__(self, mode, keepdims=True):
         """
         Args:
-            mode: OpenCV color space conversion code (e.g., `cv2.COLOR_BGR2HSV`)
+            mode: OpenCV color space conversion code (e.g., ``cv2.COLOR_BGR2HSV``)
             keepdims (bool): keep the dimension of image unchanged if OpenCV
                 changes it.
         """

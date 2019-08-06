@@ -1,33 +1,38 @@
 # -*- coding: utf-8 -*-
 # File: parallel_map.py
-import numpy as np
-import ctypes
 import copy
-import threading
+import ctypes
 import multiprocessing as mp
-from six.moves import queue
+import numpy as np
+import threading
 import zmq
+from six.moves import queue
 
-from .base import DataFlow, ProxyDataFlow, DataFlowReentrantGuard
 from ..utils.concurrency import StoppableThread, enable_death_signal
-from ..utils import logger
-from ..utils.serialize import loads, dumps
-
-from .parallel import (
-    _MultiProcessZMQDataFlow, _repeat_iter, _get_pipe_name,
-    _bind_guard, _zmq_catch_error)
-
+from ..utils.serialize import dumps, loads
+from .base import DataFlow, DataFlowReentrantGuard, ProxyDataFlow
+from .common import RepeatedData
+from .parallel import _bind_guard, _get_pipe_name, _MultiProcessZMQDataFlow, _repeat_iter, _zmq_catch_error
 
 __all__ = ['ThreadedMapData', 'MultiThreadMapData',
            'MultiProcessMapData', 'MultiProcessMapDataZMQ']
 
 
 class _ParallelMapData(ProxyDataFlow):
-    def __init__(self, ds, buffer_size):
+    def __init__(self, ds, buffer_size, strict=False):
         super(_ParallelMapData, self).__init__(ds)
         assert buffer_size > 0, buffer_size
         self._buffer_size = buffer_size
-        self._buffer_occupancy = 0  # actual #elements in buffer
+        self._buffer_occupancy = 0  # actual #elements in buffer, only useful in strict mode
+        self._strict = strict
+
+    def reset_state(self):
+        super(_ParallelMapData, self).reset_state()
+        if not self._strict:
+            ds = RepeatedData(self.ds, -1)
+        else:
+            ds = self.ds
+        self._iter = ds.__iter__()
 
     def _recv(self):
         pass
@@ -49,9 +54,9 @@ class _ParallelMapData(ProxyDataFlow):
                 dp = next(self._iter)
                 self._send(dp)
         except StopIteration:
-            logger.error(
-                "[{}] buffer_size cannot be larger than the size of the DataFlow!".format(type(self).__name__))
-            raise
+            raise RuntimeError(
+                "[{}] buffer_size cannot be larger than the size of the DataFlow when strict=True!".format(
+                    type(self).__name__))
         self._buffer_occupancy += cnt
 
     def get_data_non_strict(self):
@@ -61,19 +66,12 @@ class _ParallelMapData(ProxyDataFlow):
             if ret is not None:
                 yield ret
 
-        self._iter = self.ds.get_data()   # refresh
-        for _ in range(self._buffer_size):
-            self._send(next(self._iter))
-            ret = self._recv()
-            if ret is not None:
-                yield ret
-
     def get_data_strict(self):
         self._fill_buffer()
         for dp in self._iter:
             self._send(dp)
             yield self._recv_filter_none()
-        self._iter = self.ds.get_data()   # refresh
+        self._iter = self.ds.__iter__()   # refresh
 
         # first clear the buffer, then fill
         for k in range(self._buffer_size):
@@ -83,6 +81,14 @@ class _ParallelMapData(ProxyDataFlow):
                 self._fill_buffer()
             yield dp
 
+    def __iter__(self):
+        if self._strict:
+            for dp in self.get_data_strict():
+                yield dp
+        else:
+            for dp in self.get_data_non_strict():
+                yield dp
+
 
 class MultiThreadMapData(_ParallelMapData):
     """
@@ -90,22 +96,27 @@ class MultiThreadMapData(_ParallelMapData):
     This is useful when the mapping function is the bottleneck, but you don't
     want to start processes for the entire dataflow pipeline.
 
+    The semantics of this class is **identical** to :class:`MapData` except for the ordering.
+    Threads run in parallel and can take different time to run the
+    mapping function. Therefore the order of datapoints won't be preserved.
+
+    When ``strict=True``, ``MultiThreadMapData(df, ...)``
+    is guaranteed to produce the exact set of data as ``MapData(df, ...)``,
+    if both are iterated until ``StopIteration``. But the produced data will have different ordering.
+    The behavior of strict mode is undefined if the given dataflow ``df`` is infinite.
+
+    When ``strict=False``, the data that's produced by ``MultiThreadMapData(df, ...)``
+    is a reordering of the data produced by ``RepeatedData(MapData(df, ...), -1)``.
+    In other words, first pass of ``MultiThreadMapData.__iter__`` may contain
+    datapoints from the second pass of ``df.__iter__``.
+
+
     Note:
-        1. There is tiny communication overhead with threads, but you
-           should avoid starting many threads in your main process to reduce GIL contention.
+        1. You should avoid starting many threads in your main process to reduce GIL contention.
 
            The threads will only start in the process which calls :meth:`reset_state()`.
            Therefore you can use ``PrefetchDataZMQ(MultiThreadMapData(...), 1)``
            to reduce GIL contention.
-
-        2. Threads run in parallel and can take different time to run the
-           mapping function. Therefore the order of datapoints won't be
-           preserved, and datapoints from one pass of `df.get_data()` might get
-           mixed with datapoints from the next pass.
-
-           You can use **strict mode**, where `MultiThreadMapData.get_data()`
-           is guaranteed to produce the exact set which `df.get_data()`
-           produces. Although the order of data still isn't preserved.
     """
     class _Worker(StoppableThread):
         def __init__(self, inq, outq, evt, map_func):
@@ -137,11 +148,12 @@ class MultiThreadMapData(_ParallelMapData):
         Args:
             ds (DataFlow): the dataflow to map
             nr_thread (int): number of threads to use
-            map_func (callable): datapoint -> datapoint | None
+            map_func (callable): datapoint -> datapoint | None. Return None to
+                discard/skip the datapoint.
             buffer_size (int): number of datapoints in the buffer
             strict (bool): use "strict mode", see notes above.
         """
-        super(MultiThreadMapData, self).__init__(ds, buffer_size)
+        super(MultiThreadMapData, self).__init__(ds, buffer_size, strict)
 
         self._strict = strict
         self.nr_thread = nr_thread
@@ -165,7 +177,6 @@ class MultiThreadMapData(_ParallelMapData):
         for t in self._threads:
             t.start()
 
-        self._iter = self.ds.get_data()
         self._guard = DataFlowReentrantGuard()
 
         # Call once at the beginning, to ensure inq+outq has a total of buffer_size elements
@@ -177,14 +188,10 @@ class MultiThreadMapData(_ParallelMapData):
     def _send(self, dp):
         self._in_queue.put(dp)
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard:
-            if self._strict:
-                for dp in self.get_data_strict():
-                    yield dp
-            else:
-                for dp in self.get_data_non_strict():
-                    yield dp
+            for dp in super(MultiThreadMapData, self).__iter__():
+                yield dp
 
     def __del__(self):
         if self._evt is not None:
@@ -205,15 +212,19 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
     Same as :class:`MapData`, but start processes to run the mapping function,
     and communicate with ZeroMQ pipe.
 
-    Note:
-        1. Processes run in parallel and can take different time to run the
-           mapping function. Therefore the order of datapoints won't be
-           preserved, and datapoints from one pass of `df.get_data()` might get
-           mixed with datapoints from the next pass.
+    The semantics of this class is **identical** to :class:`MapData` except for the ordering.
+    Processes run in parallel and can take different time to run the
+    mapping function. Therefore the order of datapoints won't be preserved.
 
-           You can use **strict mode**, where `MultiProcessMapData.get_data()`
-           is guaranteed to produce the exact set which `df.get_data()`
-           produces. Although the order of data still isn't preserved.
+    When ``strict=True``, ``MultiProcessMapData(df, ...)``
+    is guaranteed to produce the exact set of data as ``MapData(df, ...)``,
+    if both are iterated until ``StopIteration``. But the produced data will have different ordering.
+    The behavior of strict mode is undefined if the given dataflow ``df`` is infinite.
+
+    When ``strict=False``, the data that's produced by ``MultiProcessMapData(df, ...)``
+    is a reordering of the data produced by ``RepeatedData(MapData(df, ...), -1)``.
+    In other words, first pass of ``MultiProcessMapData.__iter__`` may contain
+    datapoints from the second pass of ``df.__iter__``.
     """
     class _Worker(mp.Process):
         def __init__(self, identity, map_func, pipename, hwm):
@@ -224,7 +235,7 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
             self.hwm = hwm
 
         def run(self):
-            enable_death_signal()
+            enable_death_signal(_warn=self.identity == b'0')
             ctx = zmq.Context()
             socket = ctx.socket(zmq.REP)
             socket.setsockopt(zmq.IDENTITY, self.identity)
@@ -241,11 +252,12 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
         Args:
             ds (DataFlow): the dataflow to map
             nr_proc(int): number of threads to use
-            map_func (callable): datapoint -> datapoint | None
+            map_func (callable): datapoint -> datapoint | None. Return None to
+                discard/skip the datapoint.
             buffer_size (int): number of datapoints in the buffer
             strict (bool): use "strict mode", see notes above.
         """
-        _ParallelMapData.__init__(self, ds, buffer_size)
+        _ParallelMapData.__init__(self, ds, buffer_size, strict)
         _MultiProcessZMQDataFlow.__init__(self)
         self.nr_proc = nr_proc
         self.map_func = map_func
@@ -253,7 +265,10 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
         self._procs = []
         self._guard = DataFlowReentrantGuard()
 
-    def _reset_once(self):
+    def reset_state(self):
+        _MultiProcessZMQDataFlow.reset_state(self)
+        _ParallelMapData.reset_state(self)
+
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.DEALER)
         self.socket.set_hwm(self._buffer_size * 2)
@@ -266,14 +281,8 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
             self._proc_ids[k], self.map_func, pipename, worker_hwm)
             for k in range(self.nr_proc)]
 
-        self.ds.reset_state()
-        self._iter = self.ds.get_data()
-
         self._start_processes()
         self._fill_buffer()     # pre-fill the bufer
-
-    def reset_state(self):
-        _MultiProcessZMQDataFlow.reset_state(self)
 
     def _send(self, dp):
         msg = [b"", dumps(dp)]
@@ -284,14 +293,10 @@ class MultiProcessMapDataZMQ(_ParallelMapData, _MultiProcessZMQDataFlow):
         dp = loads(msg[1])
         return dp
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard, _zmq_catch_error('MultiProcessMapData'):
-            if self._strict:
-                for dp in self.get_data_strict():
-                    yield dp
-            else:
-                for dp in self.get_data_non_strict():
-                    yield dp
+            for dp in super(MultiProcessMapDataZMQ, self).__iter__():
+                yield dp
 
 
 MultiProcessMapData = MultiProcessMapDataZMQ  # alias
@@ -362,13 +367,13 @@ class MultiProcessMapDataComponentSharedArray(DataFlow):
         arr = mp.RawArray(ctype, int(np.prod(self.output_shape)))
         return arr
 
-    def size(self):
-        return self.ds.size()
+    def __len__(self):
+        return len(self.ds)
 
     def reset_state(self):
         self.ds.reset_state()
 
-    def get_data(self):
+    def __iter__(self):
         ds_itr = _repeat_iter(self.ds.get_data)
         with self._guard:
             while True:
@@ -388,20 +393,29 @@ class MultiProcessMapDataComponentSharedArray(DataFlow):
 
 
 if __name__ == '__main__':
+    import time
+
     class Zero(DataFlow):
         def __init__(self, size):
             self._size = size
 
-        def get_data(self):
+        def __iter__(self):
             for k in range(self._size):
                 yield [k]
 
-        def size(self):
+        def __len__(self):
             return self._size
 
-    ds = Zero(300)
-    ds = MultiProcessMapData(ds, 3, lambda x: [x[0] + 1], strict=True)
+    def f(x):
+        if x[0] < 10:
+            time.sleep(1)
+        return x
+
+    ds = Zero(100)
+    ds = MultiThreadMapData(ds, 50, f, buffer_size=50, strict=True)
     ds.reset_state()
-    for k in ds.get_data():
+    for idx, k in enumerate(ds):
         print("Bang!", k)
+        if idx == 100:
+            break
     print("END!")

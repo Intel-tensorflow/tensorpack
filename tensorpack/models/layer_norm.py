@@ -3,8 +3,9 @@
 
 
 import tensorflow as tf
-from .common import layer_register, VariableHolder
+
 from ..utils.argtools import get_data_format
+from .common import VariableHolder, layer_register
 
 __all__ = ['LayerNorm', 'InstanceNorm']
 
@@ -23,7 +24,7 @@ def LayerNorm(
         epsilon (float): epsilon to avoid divide-by-zero.
         use_scale, use_bias (bool): whether to use the extra affine transformation or not.
     """
-    data_format = get_data_format(data_format, tfmode=False)
+    data_format = get_data_format(data_format, keras_mode=False)
     shape = x.get_shape().as_list()
     ndims = len(shape)
     assert ndims in [2, 4]
@@ -74,7 +75,7 @@ def InstanceNorm(x, epsilon=1e-5, use_affine=True, gamma_init=None, data_format=
         epsilon (float): avoid divide-by-zero
         use_affine (bool): whether to apply learnable affine transformation
     """
-    data_format = get_data_format(data_format, tfmode=False)
+    data_format = get_data_format(data_format, keras_mode=False)
     shape = x.get_shape().as_list()
     assert len(shape) == 4, "Input of InstanceNorm has to be 4D!"
 

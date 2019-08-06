@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 # File: common.py
 # Author: Yuxin Wu
+
+import multiprocessing
+import numpy as np
 import random
 import time
-import multiprocessing
-from tqdm import tqdm
 from six.moves import queue
+from tqdm import tqdm
 
-from tensorpack.utils.concurrency import StoppableThread, ShareSessionThread
 from tensorpack.callbacks import Callback
 from tensorpack.utils import logger
+from tensorpack.utils.concurrency import ShareSessionThread, StoppableThread
 from tensorpack.utils.stats import StatCounter
 from tensorpack.utils.utils import get_tqdm_kwargs
 
@@ -19,7 +21,8 @@ def play_one_episode(env, func, render=False):
         """
         Map from observation to action, with 0.01 greedy.
         """
-        act = func(s[None, :, :, :])[0][0].argmax()
+        s = np.expand_dims(s, 0)  # batch
+        act = func(s)[0][0].argmax()
         if random.random() < 0.01:
             spc = env.action_space
             act = spc.sample()

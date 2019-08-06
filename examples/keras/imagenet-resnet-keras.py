@@ -3,21 +3,21 @@
 # File: imagenet-resnet-keras.py
 # Author: Yuxin Wu
 
+import argparse
 import numpy as np
 import os
 import tensorflow as tf
-import argparse
-
-from tensorpack import InputDesc, SyncMultiGPUTrainerReplicated
-from tensorpack.dataflow import FakeData, MapDataComponent
-from tensorpack.utils import logger
-from tensorpack.utils.gpu import get_num_gpu
-from tensorpack.contrib.keras import KerasModel
-from tensorpack.callbacks import *
 from tensorflow.python.keras.layers import *
 
-from imagenet_utils import get_imagenet_dataflow, fbresnet_augmentor, ImageNetModel
+from tensorpack import InputDesc, SyncMultiGPUTrainerReplicated
+from tensorpack.callbacks import *
+from tensorpack.contrib.keras import KerasModel
+from tensorpack.dataflow import FakeData, MapDataComponent
+from tensorpack.tfutils.common import get_tf_version_tuple
+from tensorpack.utils import logger
+from tensorpack.utils.gpu import get_num_gpu
 
+from imagenet_utils import fbresnet_augmentor, get_imagenet_dataflow
 
 TOTAL_BATCH_SIZE = 512
 BASE_LR = 0.1 * (TOTAL_BATCH_SIZE // 256)
@@ -34,7 +34,8 @@ def conv(x, filters, kernel, strides=1, name=None):
     return Conv2D(filters, kernel, name=name,
                   strides=strides, use_bias=False, padding='same',
                   kernel_initializer=tf.keras.initializers.VarianceScaling(
-                      scale=2.0, mode='fan_out', distribution='normal'),
+                      scale=2.0, mode='fan_out',
+                      distribution='untruncated_normal' if get_tf_version_tuple() >= (1, 12) else 'normal'),
                   kernel_regularizer=tf.keras.regularizers.l2(5e-5))(x)
 
 
@@ -90,7 +91,11 @@ def resnet50(image):
     input = Input(tensor=image)
 
     def image_preprocess(image):
-        image = ImageNetModel.image_preprocess(image)
+        image = tf.cast(image, tf.float32)
+        image = image * (1.0 / 255)
+        mean = [0.485, 0.456, 0.406][::-1]
+        std = [0.229, 0.224, 0.225][::-1]
+        image = (image - tf.constant(mean, dtype=tf.float32)) / tf.constant(std, dtype=tf.float32)
         image = tf.transpose(image, [0, 3, 1, 2])
         return image
 
@@ -143,8 +148,8 @@ if __name__ == '__main__':
 
     num_gpu = get_num_gpu()
     if args.fake:
-        df_train = FakeData([[64, 224, 224, 3], [64, 1000]], 5000, random=False, dtype='uint8')
-        df_val = FakeData([[64, 224, 224, 3], [64, 1000]], 5000, random=False)
+        df_train = FakeData([[32, 224, 224, 3], [32, 1000]], 5000, random=False, dtype='uint8')
+        df_val = FakeData([[32, 224, 224, 3], [32, 1000]], 5000, random=False)
     else:
         batch_size = TOTAL_BATCH_SIZE // num_gpu
         assert args.data is not None

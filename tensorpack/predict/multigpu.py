@@ -3,10 +3,11 @@
 
 
 import tensorflow as tf
-from ..utils import logger
+
 from ..graph_builder.model_desc import InputDesc
 from ..input_source import PlaceholderInput
 from ..tfutils.tower import PredictTowerContext
+from ..utils import logger
 from .base import OnlinePredictor
 
 __all__ = ['MultiTowerOfflinePredictor',
@@ -37,14 +38,17 @@ class MultiTowerOfflinePredictor(OnlinePredictor):
             for idx, t in enumerate(towers):
                 tower_name = 'tower' + str(t)
 
+                device = '/gpu:{}'.format(t)
                 with tf.variable_scope(tf.get_variable_scope(), reuse=idx > 0), \
-                        tf.device('/gpu:{}'.format(t)), \
+                        tf.device(device), \
                         PredictTowerContext(tower_name):
+                    logger.info("Building graph for predict tower '{}' on device {} ...".format(tower_name, device))
                     config.tower_func(*input.get_input_tensors())
                     handles.append(config.tower_func.towers[-1])
 
+            config.session_init._setup_graph()
             self.sess = config.session_creator.create_session()
-            config.session_init.init(self.sess)
+            config.session_init._run_init(self.sess)
 
             for h in handles:
                 input_tensors = h.get_tensors(config.input_names)
@@ -111,7 +115,8 @@ class DataParallelOfflinePredictor(OnlinePredictor):
                     input_tensors.extend(h.get_tensors(config.input_names))
                     output_tensors.extend(h.get_tensors(config.output_names))
 
+            config.session_init._setup_graph()
             sess = config.session_creator.create_session()
-            config.session_init.init(sess)
+            config.session_init._run_init(sess)
             super(DataParallelOfflinePredictor, self).__init__(
                 input_tensors, output_tensors, config.return_input, sess)

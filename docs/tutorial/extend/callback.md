@@ -4,6 +4,7 @@
 __Everything__ other than the training iterations happen in the callbacks.
 Most of the fancy things you want to do will probably end up here.
 
+Callbacks are called during training.
 The time where each callback method gets called is demonstrated in this snippet.
 ```python
 def train(self):
@@ -28,7 +29,7 @@ Note that at each place, each callback will be called in the order they are give
 ### Explain the Callback Methods
 
 To write a callback, subclass `Callback` and implement the corresponding underscore-prefixed methods.
-You can overwrite any of the following methods to define a new callback:
+You can overwrite any of the following methods in the new callback:
 
 * `_setup_graph(self)`
 
@@ -61,7 +62,7 @@ You can overwrite any of the following methods to define a new callback:
 * `_before_epoch(self)`, `_after_epoch(self)`
 
   `_trigger_epoch` should be enough for most cases, as can be seen from the scheduling snippet above.
-  Use these two methods __only__ when you really need something to happen __immediately__ before/after an epoch.
+  These two methods should be used __only__ when you really need something to happen __immediately__ before/after an epoch.
 	And when you do need to use them, make sure they are very very fast to avoid affecting other callbacks which use them.
 
 * `_before_run(self, ctx)`, `_after_run(self, ctx, values)`
@@ -78,10 +79,15 @@ You can overwrite any of the following methods to define a new callback:
     return tf.train.SessionRunArgs(fetches=my_op)
   ```
 
-  The training loops would become `sess.run([training_op, my_op])`.
-  This is different from `sess.run(training_op); sess.run(my_op);`,
-  which is what you would get if you write `self.trainer.sess.run(my_op)` in `_trigger_step`.
+  The training loops would become equivalent to `sess.run([training_op, my_op])`.
+  
+  However, if you write `my_op.run()` in `_trigger_step`, the training loop would become
+  `sess.run(training_op); sess.run(my_op);`.
   Usually the difference matters, please choose carefully.
+  
+  If you want to run ops that depend on your inputs, it's better to run it
+  __along with__ the training iteration, to avoid wasting a datapoint and avoid
+  messing up hooks of the `InputSource`.
 
 * `_trigger_step(self)`
 
@@ -90,7 +96,7 @@ You can overwrite any of the following methods to define a new callback:
 
 * `_trigger_epoch(self)`
 
-  Do something after each epoch has finished. Will call `self.trigger()` by default.
+  Do something after each epoch has finished. This method calls `self.trigger()` by default.
 
 * `_trigger(self)`
 
@@ -105,7 +111,13 @@ You can overwrite any of the following methods to define a new callback:
 * Access tensors / ops (details mentioned above):
 	* For existing tensors/ops created in the tower, access them through [self.trainer.towers](../../modules/train.html#tensorpack.train.TowerTrainer.towers).
 	* Extra tensors/ops have to be created in `_setup_graph` callback method.
-* Access the current graph and session by `self.trainer.graph` and `self.trainer.sess`.
+* Access the current graph and session by `self.trainer.graph` and
+  `self.trainer.sess`, `self.trainer.hooked_sess`.
+  Note that calling `(hooked_)sess.run` to evaluate tensors may have unexpected
+  effect in certain scenarios. 
+  In general, use `sess.run` to evaluate tensors that do not depend on the inputs.
+  And use `_{before,after}_run` to evaluate tensors together with inputs if the
+  tensors depend on the inputs.
 * Write stuff to the monitor backend, by `self.trainer.monitors.put_xxx`.
   The monitors might direct your events to TensorFlow events file, JSON file, stdout, etc.
   You can access history monitor data as well. See the docs for [Monitors](../../modules/callbacks.html#tensorpack.callbacks.Monitors)
@@ -116,7 +128,7 @@ You can overwrite any of the following methods to define a new callback:
 ### Typical Steps about Writing/Using a Callback
 
 * Define the callback in `__init__`, prepare for it in `_setup_graph, _before_train`.
-* Know whether you want to do something __along with__ the session run or not.
+* Know whether you want to do something __along with__ the training iterations or not.
   If yes, implement the logic with `_{before,after}_run`.
   Otherwise, implement in `_trigger`, or `_trigger_step`.
 * You can choose to only implement "what to do", and leave "when to do" to
@@ -126,3 +138,8 @@ You can overwrite any of the following methods to define a new callback:
   or [EnableCallbackIf](../../modules/callbacks.html#tensorpack.callbacks.EnableCallbackIf).
 	Of course you also have the freedom to implement "what to do" and "when to do" altogether.
 
+
+### Examples
+
+Check source code of the [existing tensorpack callbacks](../../modules/callbacks.html). 
+Or grep 'Callback' in tensorpack examples for those implemented as extensions.

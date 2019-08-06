@@ -2,20 +2,19 @@
 # File: summary.py
 
 
+import re
+from contextlib import contextmanager
 import six
 import tensorflow as tf
-import re
 from six.moves import range
-from contextlib import contextmanager
-
 from tensorflow.python.training import moving_averages
 
 from ..utils import logger
 from ..utils.argtools import graph_memoized
 from ..utils.naming import MOVING_SUMMARY_OPS_KEY
-from .tower import get_current_tower_context
-from .symbolic_functions import rms
 from .scope_utils import cached_name_scope
+from .symbolic_functions import rms
+from .tower import get_current_tower_context
 
 __all__ = ['add_tensor_summary', 'add_param_summary',
            'add_activation_summary', 'add_moving_summary',
@@ -68,6 +67,7 @@ def create_image_summary(name, val):
     n, h, w, c = val.shape
     val = val.astype('uint8')
     s = tf.Summary()
+    imparams = [cv2.IMWRITE_PNG_COMPRESSION, 9]
     for k in range(n):
         arr = val[k]
         # CV2 will only write correctly in BGR chanel order
@@ -76,8 +76,7 @@ def create_image_summary(name, val):
         elif c == 4:
             arr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA)
         tag = name if n == 1 else '{}/{}'.format(name, k)
-
-        retval, img_str = cv2.imencode('.png', arr)
+        retval, img_str = cv2.imencode('.png', arr, imparams)
         if not retval:
             # Encoding has failed.
             continue
@@ -119,7 +118,7 @@ def add_tensor_summary(x, types, name=None, collections=None,
     if name is None:
         name = x.op.name
     ctx = get_current_tower_context()
-    if ctx is not None and not ctx.is_main_training_tower:
+    if main_tower_only and ctx is not None and not ctx.is_main_training_tower:
         return
 
     SUMMARY_TYPES_DIC = {
@@ -223,19 +222,26 @@ def add_moving_summary(*args, **kwargs):
     # allow ctx to be none
     if ctx is not None and not ctx.is_main_training_tower:
         return []
+
+    graph = tf.get_default_graph()
+    try:
+        control_flow_ctx = graph._get_control_flow_context()
+        # XLA does not support summaries anyway
+        # However, this function will generate unnecessary dependency edges,
+        # which makes the tower function harder to compile under XLA, so we skip it
+        if control_flow_ctx is not None and control_flow_ctx.IsXLAContext():
+            return
+    except Exception:
+        pass
+
     if tf.get_variable_scope().reuse is True:
         logger.warn("add_moving_summary() called under reuse=True scope, ignored.")
         return []
-
-    if len(args) == 1 and isinstance(args[0], (list, tuple)):
-        logger.warn("add_moving_summary() takes positional args instead of an iterable of tensors!")
-        args = args[0]
 
     for x in args:
         assert isinstance(x, (tf.Tensor, tf.Variable)), x
         assert x.get_shape().ndims == 0, \
             "add_moving_summary() only accepts scalar tensor! Got one with {}".format(x.get_shape())
-    # TODO variable not saved under distributed
 
     ema_ops = []
     for c in args:
@@ -246,7 +252,8 @@ def add_moving_summary(*args, **kwargs):
             # assign_moving_average creates variables with op names, therefore clear ns first.
             with _enter_vs_reuse_ns('EMA') as vs:
                 ema_var = tf.get_variable(name, shape=c.shape, dtype=c.dtype,
-                                          initializer=tf.constant_initializer(), trainable=False)
+                                          initializer=tf.constant_initializer(),
+                                          trainable=False)
                 ns = vs.original_name_scope
             with tf.name_scope(ns):     # reuse VS&NS so that EMA_1 won't appear
                 ema_op = moving_averages.assign_moving_average(

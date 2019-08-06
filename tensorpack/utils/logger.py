@@ -1,15 +1,27 @@
 # -*- coding: utf-8 -*-
 # File: logger.py
 
+"""
+The logger module itself has the common logging functions of Python's
+:class:`logging.Logger`. For example:
+
+.. code-block:: python
+
+    from tensorpack.utils import logger
+    logger.set_logger_dir('train_log/test')
+    logger.info("Test")
+    logger.error("Error happened!")
+"""
+
 
 import logging
 import os
-import shutil
 import os.path
-from termcolor import colored
+import shutil
+import sys
 from datetime import datetime
 from six.moves import input
-import sys
+from termcolor import colored
 
 __all__ = ['set_logger_dir', 'auto_set_dir', 'get_logger_dir']
 
@@ -22,6 +34,8 @@ class _MyFormatter(logging.Formatter):
             fmt = date + ' ' + colored('WRN', 'red', attrs=['blink']) + ' ' + msg
         elif record.levelno == logging.ERROR or record.levelno == logging.CRITICAL:
             fmt = date + ' ' + colored('ERR', 'red', attrs=['blink', 'underline']) + ' ' + msg
+        elif record.levelno == logging.DEBUG:
+            fmt = date + ' ' + colored('DBG', 'yellow', attrs=['blink']) + ' ' + msg
         else:
             fmt = date + ' ' + msg
         if hasattr(self, '_style'):
@@ -42,19 +56,21 @@ def _getlogger():
 
 
 _logger = _getlogger()
-_LOGGING_METHOD = ['info', 'warning', 'error', 'critical', 'warn', 'exception', 'debug', 'setLevel']
+_LOGGING_METHOD = ['info', 'warning', 'error', 'critical', 'exception', 'debug', 'setLevel']
 # export logger functions
 for func in _LOGGING_METHOD:
     locals()[func] = getattr(_logger, func)
     __all__.append(func)
+# 'warn' is deprecated in logging module
+warn = _logger.warning
+__all__.append('warn')
 
 
 def _get_time_str():
     return datetime.now().strftime('%m%d-%H%M%S')
 
 
-# logger file and directory:
-global LOG_DIR, _FILE_HANDLER
+# globals: logger file and directory:
 LOG_DIR = None
 _FILE_HANDLER = None
 
@@ -142,7 +158,7 @@ def auto_set_dir(action=None, name=None):
     basename = os.path.basename(mod.__file__)
     auto_dirname = os.path.join('train_log', basename[:basename.rfind('.')])
     if name:
-        auto_dirname += ':%s' % name
+        auto_dirname += '_%s' % name if os.name == 'nt' else ':%s' % name
     set_logger_dir(auto_dirname, action=action)
 
 

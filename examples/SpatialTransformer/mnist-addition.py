@@ -3,16 +3,15 @@
 # File: mnist-addition.py
 # Author: Yuxin Wu
 
-import cv2
-import numpy as np
-import tensorflow as tf
-import os
 import argparse
-
+import numpy as np
+import os
+import cv2
+import tensorflow as tf
 
 from tensorpack import *
 from tensorpack.dataflow import dataset
-from tensorpack.tfutils import optimizer, summary, gradproc
+from tensorpack.tfutils import gradproc, optimizer, summary
 
 IMAGE_SIZE = 42
 WARP_TARGET_SIZE = 28
@@ -35,7 +34,7 @@ def sample(img, coords):
     max_coor = tf.constant([shape[0] - 1, shape[1] - 1], dtype=tf.float32)
 
     coords = tf.clip_by_value(coords, 0., max_coor)  # borderMode==repeat
-    coords = tf.to_int32(coords)
+    coords = tf.cast(coords, tf.int32)
 
     batch_index = tf.range(batch, dtype=tf.int32)
     batch_index = tf.reshape(batch_index, [-1, 1, 1, 1])
@@ -46,15 +45,21 @@ def sample(img, coords):
 
 
 @layer_register(log_shape=True)
-def BilinearSample(inputs, borderMode='repeat'):
+def GridSample(inputs, borderMode='repeat'):
     """
     Sample the images using the given coordinates, by bilinear interpolation.
     This was described in the paper:
     `Spatial Transformer Networks <http://arxiv.org/abs/1506.02025>`_.
 
+    This is equivalent to `torch.nn.functional.grid_sample`,
+    up to some non-trivial coordinate transformation.
+
+    This implementation returns pixel value at pixel (1, 1) for a floating point coordinate (1.0, 1.0).
+    Note that this may not be what you need.
+
     Args:
         inputs (list): [images, coords]. images has shape NHWC.
-            coords has shape (N, H', W', 2), where each pair in the last dimension is a (y, x) real-value
+            coords has shape (N, H', W', 2), where each pair of the last dimension is a (y, x) real-value
             coordinate.
         borderMode: either "repeat" or "constant" (zero-filled)
 
@@ -63,10 +68,9 @@ def BilinearSample(inputs, borderMode='repeat'):
     """
     image, mapping = inputs
     assert image.get_shape().ndims == 4 and mapping.get_shape().ndims == 4
-    assert mapping.dtype.is_floating, mapping
     input_shape = image.get_shape().as_list()[1:]
     assert None not in input_shape, \
-        "Images must have fully-defined shape"
+        "Images in GridSample layer must have fully-defined shape"
     assert borderMode in ['repeat', 'constant']
 
     orig_mapping = mapping
@@ -129,7 +133,7 @@ class Model(ModelDesc):
             coor = tf.reshape(tf.matmul(xys, stn),
                               [WARP_TARGET_SIZE, WARP_TARGET_SIZE, -1, 2])
             coor = tf.transpose(coor, [2, 0, 1, 3], 'sampled_coords')  # b h w 2
-            sampled = BilinearSample('warp', [image, coor], borderMode='constant')
+            sampled = GridSample('warp', [image, coor], borderMode='constant')
             return sampled
 
         with argscope([Conv2D, FullyConnected], activation=tf.nn.relu):
@@ -159,7 +163,7 @@ class Model(ModelDesc):
         cost = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')
 
-        wrong = tf.to_float(tf.logical_not(tf.nn.in_top_k(logits, label, 1)), name='incorrect_vector')
+        wrong = tf.cast(tf.logical_not(tf.nn.in_top_k(logits, label, 1)), tf.float32, name='incorrect_vector')
         summary.add_moving_summary(tf.reduce_mean(wrong, name='train_error'))
 
         wd_cost = tf.multiply(1e-5, regularize_cost('fc.*/W', tf.nn.l2_loss),
@@ -217,7 +221,7 @@ def view_warp(modelpath):
 
     ds = get_data(False)
     ds.reset_state()
-    for k in ds.get_data():
+    for k in ds:
         img, label = k
         outputs, affine1, affine2 = pred(img)
         for idx, viz in enumerate(outputs):
@@ -233,7 +237,7 @@ def get_config():
     logger.auto_set_dir()
 
     dataset_train, dataset_test = get_data(True), get_data(False)
-    steps_per_epoch = dataset_train.size() * 5
+    steps_per_epoch = len(dataset_train) * 5
 
     return TrainConfig(
         model=Model(),

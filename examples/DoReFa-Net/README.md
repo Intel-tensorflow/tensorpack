@@ -13,17 +13,18 @@ Alternative link to this page: [http://dorefa.net](http://dorefa.net)
 This is a good set of baselines for research in model quantization.
 These quantization techniques, when applied on AlexNet, achieves the following ImageNet performance in this implementation:
 
-| Model                              | Bit Width <br/> (weights, activations, gradients) | Top 1 Validation Error <sup>[1](#ft1)</sup>|
-|:----------------------------------:|:-------------------------------------------------:|:----------------------:|
-| Full Precision<sup>[2](#ft2)</sup> | 32,32,32                                          | 40.3%                  |
-| TTQ                                | t,32,32                                           | 42.0%                  |
-| BWN                                | 1,32,32                                           | 44.6%                  |
-| BNN                                | 1,1,32                                            | 51.9%                  |
-| DoReFa                             | 1,2,32                                            | 46.6%                  |
-| DoReFa                             | 1,2,6                                             | 46.8%                  |
-| DoReFa                             | 1,2,4                                             | 54.0%                  |
+| Model                              | Bit Width <br/> (weights, activations, gradients) | Top 1 Validation Error <sup>[1](#ft1)</sup>                                      |
+|:----------------------------------:|:-------------------------------------------------:|:--------------------------------------------------------------------------------:|
+| Full Precision<sup>[2](#ft2)</sup> | 32,32,32                                          | 40.3%                                                                            |
+| TTQ                                | t,32,32                                           | 42.0%                                                                            |
+| BWN                                | 1,32,32                                           | 44.3% [:arrow_down:](http://models.tensorpack.com/DoReFa-Net/AlexNet-1,32,32.npz) |
+| BNN                                | 1,1,32                                            | 51.5% [:arrow_down:](http://models.tensorpack.com/DoReFa-Net/AlexNet-1,1,32.npz) |
+| DoReFa                             | 8,8,8                                             | 42.0% [:arrow_down:](http://models.tensorpack.com/DoReFa-Net/AlexNet-8,8,8.npz)  |
+| DoReFa                             | 1,2,32                                            | 46.6%                                                                            |
+| DoReFa                             | 1,2,6                                             | 46.8% [:arrow_down:](http://models.tensorpack.com/DoReFa-Net/AlexNet-1,2,6.npz)  |
+| DoReFa                             | 1,2,4                                             | 54.0%                                                                            |
 
- <a id="ft1">1</a>: These numbers were obtained by training on 8 GPUs with a total batch size of 256.
+ <a id="ft1">1</a>: These numbers were obtained by training on 8 GPUs with a total batch size of 256 (otherwise the performance may become slightly different).
 The DoReFa-Net models reach slightly better performance than our paper, due to
 more sophisticated augmentations.
 
@@ -36,17 +37,15 @@ We hosted a demo at CVPR16 on behalf of Megvii, Inc, running a 1/4-VGG size DoRe
 DoReFa-Net and its variants have been deployed widely in Megvii's embeded products.
 
 This code release is meant for research purpose. We're not planning to release our C++ runtime for bit-operations.
-In this implementation, quantized operations are all performed through `tf.float32`.
+In this implementation, quantized operations are all performed through `tf.float32`. They don't make your network faster.
 
 ## Use
 
-+ Install TensorFlow>=1.7. For TensorFlow<1.7, you can use an earlier implementation of `dorefa.py` at [here](https://github.com/tensorpack/tensorpack/blob/58529de18e9bdad1bab31aed9c397a8f340e7f94/examples/DoReFa-Net/dorefa.py)
-
-+ Install tensorpack and scipy.
++ Install TensorFlow ≥ 1.7, tensorpack and scipy.
 
 + Look at the docstring in `*-dorefa.py` to see detailed usage and performance.
 
-Pretrained model for (1,4,32)-ResNet18 and (1,2,6)-AlexNet are available at
+Pretrained model for (1,4,32)-ResNet18 and several AlexNet are available at
 [tensorpack model zoo](http://models.tensorpack.com/DoReFa-Net/).
 They're provided in the format of numpy dictionary.
 The __binary-weight 4-bit-activation ResNet-18__ model has 59.2% top-1 validation accuracy.

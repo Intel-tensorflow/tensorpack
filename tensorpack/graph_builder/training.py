@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 # File: training.py
 
-from abc import ABCMeta, abstractmethod
-import tensorflow as tf
 import copy
-import six
-import re
 import pprint
-from six.moves import zip, range
+import re
+from abc import ABCMeta, abstractmethod
 from contextlib import contextmanager
+import six
+import tensorflow as tf
+from six.moves import range, zip
 
-from ..utils import logger
-from ..tfutils.tower import TrainTowerContext
+from ..tfutils.common import get_tf_version_tuple
 from ..tfutils.gradproc import ScaleGradient
-
+from ..tfutils.tower import TrainTowerContext
+from ..utils import logger
 from .utils import (
-    LeastLoadedDeviceSetter, override_to_local_variable,
-    allreduce_grads, aggregate_grads, allreduce_grads_hierarchical,
-    split_grad_list, merge_grad_list, GradientPacker)
-
+    GradientPacker, LeastLoadedDeviceSetter, aggregate_grads, allreduce_grads, allreduce_grads_hierarchical,
+    merge_grad_list, override_to_local_variable, split_grad_list)
 
 __all__ = ['GraphBuilder',
            'SyncMultiGPUParameterServerBuilder', 'DataParallelBuilder',
@@ -76,7 +74,7 @@ class DataParallelBuilder(GraphBuilder):
             raise ValueError("Number of gradients from each tower is different! " + str(nvars))
 
     @staticmethod
-    def build_on_towers(
+    def call_for_each_tower(
             towers, func, devices=None, use_vs=None):
         """
         Run `func` on all GPUs (towers) and return the results.
@@ -118,6 +116,10 @@ class DataParallelBuilder(GraphBuilder):
                     ret.append(func())
         return ret
 
+    @staticmethod
+    def build_on_towers(*args, **kwargs):
+        return DataParallelBuilder.call_for_each_tower(*args, **kwargs)
+
 
 class SyncMultiGPUParameterServerBuilder(DataParallelBuilder):
     """
@@ -139,16 +141,12 @@ class SyncMultiGPUParameterServerBuilder(DataParallelBuilder):
         assert ps_device in ['cpu', 'gpu']
         self.ps_device = ps_device
 
-    def build(self, get_grad_fn, get_opt_fn):
+    def call_for_each_tower(self, tower_fn):
         """
-        Build the graph, and set self.grads to a list of (g, v), containing the averaged gradients.
-
-        Args:
-            get_grad_fn (-> [(grad, var)]):
-            get_opt_fn (-> tf.train.Optimizer): callable which returns an optimizer
+        Call the function `tower_fn` under :class:`TowerContext` for each tower.
 
         Returns:
-            tf.Operation: the training op
+            a list, contains the return values of `tower_fn` on each tower.
         """
         raw_devices = ['/gpu:{}'.format(k) for k in self.towers]
         if self.ps_device == 'gpu':
@@ -157,7 +155,21 @@ class SyncMultiGPUParameterServerBuilder(DataParallelBuilder):
             devices = [tf.train.replica_device_setter(
                 worker_device=d, ps_device='/cpu:0', ps_tasks=1) for d in raw_devices]
 
-        grad_list = DataParallelBuilder.build_on_towers(self.towers, get_grad_fn, devices)
+        return DataParallelBuilder.build_on_towers(self.towers, tower_fn, devices)
+
+    def build(self, grad_list, get_opt_fn):
+        """
+        Reduce the gradients, apply them with the optimizer,
+        and set self.grads to a list of (g, v), containing the averaged gradients.
+
+        Args:
+            grad_list ([[(grad, var), ...], ...]): #GPU lists to be reduced. Each is the gradients computed on each GPU.
+            get_opt_fn (-> tf.train.Optimizer): callable which returns an optimizer
+
+        Returns:
+            tf.Operation: the training op
+        """
+        assert len(grad_list) == len(self.towers)
         DataParallelBuilder._check_grad_list(grad_list)
 
         # debug tower performance (without update):
@@ -194,13 +206,31 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
         assert mode in ['nccl', 'cpu', 'hierarchical'], mode
         self._mode = mode
 
-    def build(self, get_grad_fn, get_opt_fn):
+        if self._mode == 'hierarchical' and len(towers) != 8:
+            logger.warn("mode='hierarchical' require >= 8 GPUs. Fallback to mode='nccl'.")
+            self._mode = 'nccl'
+
+    def call_for_each_tower(self, tower_fn):
         """
-        Build the graph, and set self.grads to #GPU number of lists of (g, v), containing the
-        all-reduced gradients on each device.
+        Call the function `tower_fn` under :class:`TowerContext` for each tower.
+
+        Returns:
+            a list, contains the return values of `tower_fn` on each tower.
+        """
+        # if tower_fn returns [(grad, var), ...], this returns #GPU x #VAR x 2
+        return DataParallelBuilder.build_on_towers(
+            self.towers,
+            tower_fn,
+            # use no variable scope for the first tower
+            use_vs=[False] + [True] * (len(self.towers) - 1))
+
+    def build(self, grad_list, get_opt_fn):
+        """
+        Reduce the gradients, apply them with the optimizer,
+        and set self.grads to #GPU number of lists of (g, v), containing the all-reduced gradients on each device.
 
         Args:
-            get_grad_fn (-> [(grad, var)]):
+            grad_list ([[(grad, var), ...], ...]): #GPU lists to be reduced. Each is the gradients computed on each GPU.
             get_opt_fn (-> tf.train.Optimizer): callable which returns an optimizer
 
         Returns:
@@ -212,29 +242,27 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
                 It has to be run before the training has started.
                 And you can optionally run it later to sync non-trainable variables.
         """
+        assert len(grad_list) == len(self.towers)
         raw_devices = ['/gpu:{}'.format(k) for k in self.towers]
-
-        # #GPU x #VAR x 2
-        grad_list = DataParallelBuilder.build_on_towers(
-            self.towers,
-            get_grad_fn,
-            # use no variable scope for the first tower
-            use_vs=[False] + [True] * (len(self.towers) - 1))
 
         DataParallelBuilder._check_grad_list(grad_list)
 
-        if self._mode == 'hierarchical' and len(raw_devices) < 8:
-            logger.warn("mode='hierarchical' require >= 8 GPUs. Fallback to mode='cpu'.")
-            self._mode = 'cpu'
-
         dtypes = set([x[0].dtype.base_dtype for x in grad_list[0]])
-        valid_for_nccl = all([k in [tf.float32, tf.float64] for k in dtypes])
+        dtypes_nccl_supported = [tf.float32, tf.float64]
+        if get_tf_version_tuple() >= (1, 8):
+            dtypes_nccl_supported.append(tf.float16)
+        valid_for_nccl = all([k in dtypes_nccl_supported for k in dtypes])
         if self._mode == 'nccl' and not valid_for_nccl:
             logger.warn("Cannot use mode='nccl' because some gradients have unsupported types. Fallback to mode='cpu'")
             self._mode = 'cpu'
 
         if self._mode in ['nccl', 'hierarchical']:
             all_grads, all_vars = split_grad_list(grad_list)
+            # use allreduce from tf-benchmarks
+            # from .batch_allreduce import AllReduceSpecAlgorithm
+            # algo = AllReduceSpecAlgorithm('nccl', list(range(8)), 0, 10)
+            # all_grads, warmup_ops = algo.batch_all_reduce(all_grads, 1, True, False)
+            # print("WARMUP OPS", warmup_ops)
 
             if self._mode == 'nccl':
                 all_grads = allreduce_grads(all_grads, average=self._average)  # #gpu x #param
@@ -288,12 +316,13 @@ class SyncMultiGPUReplicatedBuilder(DataParallelBuilder):
         post_init_ops = []
 
         def log_failure(name, reason):
-            if name in trainable_names:
-                msg = "This variable is trainable, so this is probably a fatal error."
-            else:
-                msg = "This variable is non-trainable. Ignore this warning if you know it's OK to leave it out-of-sync."
             logger.warn("[ReplicatedTrainer] Do not know how to sync variable '{}' across GPUs. "
-                        "Reason: {} ".format(name, reason) + msg)
+                        "Reason: {} ".format(name, reason))
+            assert name not in trainable_names, \
+                "The aforementioned variable is trainable, so this is probably a fatal error."
+            logger.warn(
+                "[ReplicatedTrainer] This variable is non-trainable. "
+                "Ignore this warning if you know it's OK to leave it out-of-sync.")
 
         for v in all_vars:
             if not v.name.startswith('tower'):
@@ -336,25 +365,34 @@ class AsyncMultiGPUBuilder(DataParallelBuilder):
         super(AsyncMultiGPUBuilder, self).__init__(towers)
         self._scale_gradient = scale_gradient
 
-    def build(self, get_grad_fn, get_opt_fn):
+    def call_for_each_tower(self, tower_fn):
         """
-        Args:
-            get_grad_fn (-> [(grad, var)]):
-            get_opt_fn (-> tf.train.Optimizer): callable which returns an optimizer
+        Call the function `tower_fn` under :class:`TowerContext` for each tower.
 
         Returns:
-            tf.Operation: the training op
+            a list, contains the return values of `tower_fn` on each tower.
         """
         ps_device = 'cpu' if len(self.towers) >= 4 else 'gpu'
 
+        raw_devices = ['/gpu:{}'.format(k) for k in self.towers]
         if ps_device == 'gpu':
-            raw_devices = ['/gpu:{}'.format(k) for k in self.towers]
             devices = [LeastLoadedDeviceSetter(d, raw_devices) for d in raw_devices]
         else:
             devices = [tf.train.replica_device_setter(
                 worker_device=d, ps_device='/cpu:0', ps_tasks=1) for d in raw_devices]
 
-        grad_list = DataParallelBuilder.build_on_towers(self.towers, get_grad_fn, devices)
+        return DataParallelBuilder.build_on_towers(self.towers, tower_fn, devices)
+
+    def build(self, grad_list, get_opt_fn):
+        """
+        Args:
+            grad_list ([[(grad, var), ...], ...]): #GPU lists to be reduced. Each is the gradients computed on each GPU.
+            get_opt_fn (-> tf.train.Optimizer): callable which returns an optimizer
+
+        Returns:
+            tf.Operation: the training op
+        """
+        assert len(grad_list) == len(self.towers)
         DataParallelBuilder._check_grad_list(grad_list)
 
         if self._scale_gradient and len(self.towers) > 1:
@@ -374,4 +412,4 @@ class AsyncMultiGPUBuilder(DataParallelBuilder):
                     # will call apply_gradients (therefore gradproc) multiple times
                     train_ops.append(opt.apply_gradients(
                         grad_and_vars, name='apply_grad_{}'.format(i)))
-            return tf.group(*train_ops, name='train_op')
+        return tf.group(*train_ops, name='train_op')

@@ -1,6 +1,11 @@
 tensorpack.utils package
 ========================
 
+.. automodule:: tensorpack.utils
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 tensorpack.utils.argtools module
 --------------------------------
 
@@ -50,6 +55,15 @@ tensorpack.utils.serialize module
     :members:
     :undoc-members:
     :show-inheritance:
+
+tensorpack.utils.compatible_serialize module
+--------------------------------------------
+
+.. automodule:: tensorpack.utils.compatible_serialize
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
 
 tensorpack.utils.stats module
 -----------------------------

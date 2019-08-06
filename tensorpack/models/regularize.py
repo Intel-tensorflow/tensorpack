@@ -2,12 +2,13 @@
 # File: regularize.py
 
 
-import tensorflow as tf
 import re
+import tensorflow as tf
 
+from ..tfutils.common import get_tf_version_tuple
+from ..tfutils.tower import get_current_tower_context
 from ..utils import logger
 from ..utils.argtools import graph_memoized
-from ..tfutils.tower import get_current_tower_context
 from .common import layer_register
 
 __all__ = ['regularize_cost', 'regularize_cost_from_collection',
@@ -19,8 +20,12 @@ def _log_once(msg):
     logger.info(msg)
 
 
-l2_regularizer = tf.contrib.layers.l2_regularizer
-l1_regularizer = tf.contrib.layers.l1_regularizer
+if get_tf_version_tuple() <= (1, 12):
+    l2_regularizer = tf.contrib.layers.l2_regularizer
+    l1_regularizer = tf.contrib.layers.l1_regularizer
+else:
+    l2_regularizer = tf.keras.regularizers.l2
+    l1_regularizer = tf.keras.regularizers.l1
 
 
 def regularize_cost(regex, func, name='regularize_cost'):
@@ -29,10 +34,12 @@ def regularize_cost(regex, func, name='regularize_cost'):
     the matched variables (only print once in multi-tower training).
     In replicated mode, it will only regularize variables within the current tower.
 
+    If called under a TowerContext with `is_training==False`, this function returns a zero constant tensor.
+
     Args:
         regex (str): a regex to match variable names, e.g. "conv.*/W"
         func: the regularization function, which takes a tensor and returns a scalar tensor.
-            E.g., ``tf.contrib.layers.l2_regularizer``.
+            E.g., ``tf.nn.l2_loss, tf.contrib.layers.l1_regularizer(0.001)``.
 
     Returns:
         tf.Tensor: a scalar, the total regularization cost.
@@ -160,4 +167,7 @@ def Dropout(x, *args, **kwargs):
     if kwargs.get('training', None) is None:
         kwargs['training'] = get_current_tower_context().is_training
 
-    return tf.layers.dropout(x, rate=rate, **kwargs)
+    if get_tf_version_tuple() <= (1, 12):
+        return tf.layers.dropout(x, rate=rate, **kwargs)
+    else:
+        return tf.nn.dropout(x, rate=rate if kwargs['training'] else 0.)

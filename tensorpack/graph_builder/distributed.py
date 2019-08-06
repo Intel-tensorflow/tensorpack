@@ -1,18 +1,15 @@
 # -*- coding: utf-8 -*-
 # File: distributed.py
 
-import tensorflow as tf
 import re
+import tensorflow as tf
 from six.moves import range
 
+from ..tfutils.common import get_global_step_var, get_op_tensor_name
 from ..utils import logger
 from ..utils.argtools import memoized
-from ..tfutils.common import get_op_tensor_name, get_global_step_var
-
-from .training import GraphBuilder, DataParallelBuilder
-from .utils import (
-    override_to_local_variable, aggregate_grads,
-    OverrideCachingDevice)
+from .training import DataParallelBuilder, GraphBuilder
+from .utils import OverrideCachingDevice, aggregate_grads, override_to_local_variable
 
 __all__ = ['DistributedParameterServerBuilder', 'DistributedReplicatedBuilder']
 
@@ -72,9 +69,10 @@ class DistributedParameterServerBuilder(DataParallelBuilder, DistributedBuilderB
     `tensorflow/benchmarks <https://github.com/tensorflow/benchmarks>`_.
     However this implementation hasn't been well tested.
     It probably still has issues in model saving, etc.
+    Also, TensorFlow team is not actively maintaining distributed training features.
     Check :class:`HorovodTrainer` and
     `ResNet-Horovod <https://github.com/tensorpack/benchmarks/tree/master/ResNet-Horovod>`_
-    for faster distributed examples.
+    for better distributed training support.
 
     Note:
         1. Gradients are not averaged across workers, but applied to PS variables
@@ -143,10 +141,11 @@ class DistributedReplicatedBuilder(DataParallelBuilder, DistributedBuilderBase):
 
     It is an equivalent of ``--variable_update=distributed_replicated`` in
     `tensorflow/benchmarks <https://github.com/tensorflow/benchmarks>`_.
-    Note that the performance of this trainer is still not satisfactory.
+    Note that the performance of this trainer is still not satisfactory,
+    and TensorFlow team is not actively maintaining distributed training features.
     Check :class:`HorovodTrainer` and
     `ResNet-Horovod <https://github.com/tensorpack/benchmarks/tree/master/ResNet-Horovod>`_
-    for faster distributed examples.
+    for better distributed training support.
 
     Note:
         1. Gradients are not averaged across workers, but applied to PS variables

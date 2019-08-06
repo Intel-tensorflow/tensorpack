@@ -9,24 +9,25 @@ __Training__ code of three variants of ResNet on ImageNet:
 
 The training follows the __exact__ recipe used by the [Training ImageNet in 1 Hour paper](https://arxiv.org/abs/1706.02677)
 and gets the same performance.
-Models can be [downloaded here](http://models.tensorpack.com/ResNet/).
+__Distributed training__ code & results can be found at [tensorpack/benchmarks](https://github.com/tensorpack/benchmarks/tree/master/ResNet-Horovod).
 
 This recipe has better performance than most open source implementations.
-In fact, many papers that claim to "improve" ResNet only compete with a lower
+In fact, many papers that claim to "improve" ResNet by .5% only compete with a lower
 baseline and they actually cannot beat this ResNet recipe.
 
-| Model              | Top 5 Error | Top 1 Error |
-|:-------------------|-------------|------------:|
-| ResNet18           |     10.50%  |      29.66% |
-| ResNet34  		 |     8.56%   |      26.17% |
-| ResNet50           |     6.85%   |      23.61% |
-| ResNet50-SE       |     6.24%   |      22.64% |
-| ResNet101         |     6.04%   |      21.95% |
-| ResNet152         |     5.78%   |      21.51% |
+| Model       | Top 5 Error | Top 1 Error | Download                                                                     |
+|:------------|:------------|:-----------:|:----------------------------------------------------------------------------:|
+| ResNet18    | 10.50%      | 29.66%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet18.npz)    |
+| ResNet34    | 8.56%       | 26.17%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet34.npz)    |
+| ResNet50    | 6.85%       | 23.61%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet50.npz)    |
+| ResNet50-SE | 6.24%       | 22.64%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet50-SE.npz) |
+| ResNet101   | 6.04%       | 21.95%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet101.npz)   |
+| ResNet152   | 5.78%       | 21.51%      | [:arrow_down:](http://models.tensorpack.com/ResNet/ImageNet-ResNet152.npz)   |
 
-To train, first decompress ImageNet data into [this structure](http://tensorpack.readthedocs.io/en/latest/modules/dataflow.dataset.html#tensorpack.dataflow.dataset.ILSVRC12), then:
+To reproduce the above results,
+first decompress ImageNet data into [this structure](http://tensorpack.readthedocs.io/modules/dataflow.dataset.html#tensorpack.dataflow.dataset.ILSVRC12), then:
 ```bash
-./imagenet-resnet.py --data /path/to/original/ILSVRC -d 50 [--mode resnet/preact/se]
+./imagenet-resnet.py --data /path/to/original/ILSVRC -d 50 [--mode resnet/preact/se] --batch 256
 # See ./imagenet-resnet.py -h for other options.
 ```
 
@@ -34,7 +35,7 @@ You should be able to see good GPU utilization (95%~99%), if your data is fast e
 With batch=64x8, it can finish 100 epochs in 16 hours on AWS p3.16xlarge (8 V100s).
 
 The default data pipeline is probably OK for machines with SSD & 20 CPU cores.
-See the [tutorial](http://tensorpack.readthedocs.io/en/latest/tutorial/efficient-dataflow.html) on other options to speed up your data.
+See the [tutorial](http://tensorpack.readthedocs.io/tutorial/efficient-dataflow.html) on other options to speed up your data.
 
 ![imagenet](imagenet-resnet.png)
 
@@ -42,7 +43,7 @@ See the [tutorial](http://tensorpack.readthedocs.io/en/latest/tutorial/efficient
 
 This script only converts and runs ImageNet-ResNet{50,101,152} Caffe models [released by MSRA](https://github.com/KaimingHe/deep-residual-networks).
 Note that the architecture is different from the `imagenet-resnet.py` script and the models are not compatible.
-ResNets have evolved, generally you should not cite these numbers as baselines in your paper.
+ResNets have evolved, generally you'd better not cite these old numbers as baselines in your paper.
 
 Usage:
 ```bash
@@ -53,7 +54,8 @@ python -m tensorpack.utils.loadcaffe PATH/TO/{ResNet-101-deploy.prototxt,ResNet-
 ```
 
 The converted models are verified on ILSVRC12 validation set.
-The per-pixel mean used here is slightly different from the original.
+The per-pixel mean used here is slightly different from the original, but has
+negligible effect.
 
 | Model              | Top 5 Error | Top 1 Error |
 |:-------------------|-------------|------------:|
@@ -77,7 +79,8 @@ Reproduce the mixup pre-act ResNet-18 CIFAR10 experiment, in the paper:
 * [mixup: Beyond Empirical Risk Minimization](https://arxiv.org/abs/1710.09412).
 
 This implementation follows exact settings from the [author's code](https://github.com/hongyi-zhang/mixup).
-Note that the architecture is different from the offcial preact-ResNet18.
+Note that the architecture is different from the offcial preact-ResNet18 in the
+ResNet paper.
 
 Usage:
 ```bash

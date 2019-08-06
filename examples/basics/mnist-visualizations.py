@@ -7,6 +7,7 @@ The same MNIST ConvNet example, but with weights/activations visualization.
 """
 
 import tensorflow as tf
+
 from tensorpack import *
 from tensorpack.dataflow import dataset
 
@@ -97,7 +98,7 @@ class Model(ModelDesc):
         cost = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')
 
-        tf.reduce_mean(tf.to_float(tf.nn.in_top_k(logits, label, 1)), name='accuracy')
+        tf.reduce_mean(tf.cast(tf.nn.in_top_k(logits, label, 1)), tf.float32, name='accuracy')
 
         wd_cost = tf.multiply(1e-5,
                               regularize_cost('fc.*/W', tf.nn.l2_loss),
@@ -132,7 +133,7 @@ if __name__ == '__main__':
             InferenceRunner(
                 dataset_test, ScalarStats(['cross_entropy_loss', 'accuracy'])),
         ],
-        steps_per_epoch=dataset_train.size(),
+        steps_per_epoch=len(dataset_train),
         max_epoch=100,
     )
 

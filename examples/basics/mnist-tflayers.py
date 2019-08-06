@@ -3,6 +3,11 @@
 # File: mnist-tflayers.py
 
 import tensorflow as tf
+
+from tensorpack import *
+from tensorpack.dataflow import dataset
+from tensorpack.tfutils import get_current_tower_context, summary
+
 """
 MNIST ConvNet example using tf.layers
 Mostly the same as 'mnist-convnet.py',
@@ -10,12 +15,6 @@ the only differences are:
     1. use tf.layers
     2. use tf.layers variable names to summarize weights
 """
-
-
-# Just import everything into current namespace
-from tensorpack import *
-from tensorpack.tfutils import summary, get_current_tower_context
-from tensorpack.dataflow import dataset
 
 IMAGE_SIZE = 28
 # Monkey-patch tf.layers to support argscope.
@@ -108,8 +107,8 @@ if __name__ == '__main__':
     dataset_train, dataset_test = get_data()
 
     # How many iterations you want in each epoch.
-    # This (data.size()) is the default value.
-    steps_per_epoch = dataset_train.size()
+    # This len(data) is the default value.
+    steps_per_epoch = len(dataset_train)
 
     # get the config which contains everything necessary in a training
     config = TrainConfig(

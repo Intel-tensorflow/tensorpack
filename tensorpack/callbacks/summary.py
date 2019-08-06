@@ -2,9 +2,9 @@
 # File: summary.py
 
 
-import tensorflow as tf
 import numpy as np
 from collections import deque
+import tensorflow as tf
 
 from ..tfutils.common import get_op_tensor_name
 from ..utils import logger
@@ -19,29 +19,47 @@ class MovingAverageSummary(Callback):
     This callback is enabled by default.
     Maintain the moving average of summarized tensors in every step,
     by ops added to the collection.
-    Note that it only __maintains__ the moving averages in the graph,
+    Note that it only **maintains** the moving averages by updating
+    the relevant variables in the graph,
     the actual summary should be done in other callbacks.
     """
-    def __init__(self, collection=MOVING_SUMMARY_OPS_KEY):
+    def __init__(self, collection=MOVING_SUMMARY_OPS_KEY, train_op=None):
         """
         Args:
             collection(str): the collection of EMA-maintaining ops.
                 The default value would work with
                 the tensors you added by :func:`tfutils.summary.add_moving_summary()`,
                 but you can use other collections as well.
+            train_op (tf.Operation or str): the (name of) training op to associate the maintaing ops with.
+                If not provided, the EMA-maintaining ops will be hooked to
+                `trainer.hooked_session` and be executed in every iteration.
+                Otherwise, the EMA-maintaining ops will be executed whenever
+                the training op is executed.
         """
         self._collection = collection
+        self._train_op = train_op
 
     def _setup_graph(self):
-        ops = tf.get_collection(self._collection)
-        logger.info("Maintain moving average summary of {} tensors in collection {}.".format(
-            len(ops), self._collection))
+        ops = [k.op for k in tf.get_collection(self._collection)]
+        if self._train_op is None:
+            logger.info("[MovingAverageSummary] {} operations in collection '{}' "
+                        "will be run with session hooks.".format(len(ops), self._collection))
 
-        self.ema_op = tf.group(*ops, name='maintain_moving_average_summary')
-        self._fetch = tf.train.SessionRunArgs(fetches=self.ema_op)
+            self.ema_op = tf.group(*ops, name='maintain_moving_average_summary')
+            self._fetch = tf.train.SessionRunArgs(fetches=self.ema_op)
+        else:
+            if isinstance(self._train_op, tf.Tensor):
+                self._train_op = self._train_op.op
+            if not isinstance(self._train_op, tf.Operation):
+                self._train_op = self.graph.get_operation_by_name(self._train_op)
+            self._train_op._add_control_inputs(ops)
+            logger.info("[MovingAverageSummary] {} operations in collection '{}'"
+                        " will be run together with operation '{}'.".format(
+                            len(ops), self._collection, self._train_op.name))
 
     def _before_run(self, _):
-        return self._fetch
+        if self._train_op is None:
+            return self._fetch
 
 
 class MergeAllSummaries_RunAlone(Callback):
@@ -98,26 +116,25 @@ class MergeAllSummaries_RunWithOp(Callback):
         self.trainer.monitors.put_summary(summary)
 
 
-def MergeAllSummaries(period=0, run_alone=False, key=tf.GraphKeys.SUMMARIES):
+def MergeAllSummaries(period=0, run_alone=False, key=None):
     """
     This callback is enabled by default.
-    Evaluate all summaries by `tf.summary.merge_all`, and write to logs.
+    Evaluate all summaries by ``tf.summary.merge_all``, and write them to logs.
 
     Args:
         period (int): by default the callback summarizes once every epoch.
             This option (if not set to 0) makes it additionally summarize every ``period`` steps.
         run_alone (bool): whether to evaluate the summaries alone.
             If True, summaries will be evaluated after each epoch alone.
-            If False, summaries will be evaluated together with other
+            If False, summaries will be evaluated together with the
             `sess.run` calls, in the last step of each epoch.
             For :class:`SimpleTrainer`, it needs to be False because summary may
             depend on inputs.
-        key (str): the collection of summary tensors. Same as in `tf.summary.merge_all`.
-            Default is ``tf.GraphKeys.SUMMARIES``
-
-    Returns:
-        a Callback.
+        key (str): the collection of summary tensors. Same as in ``tf.summary.merge_all``.
+            Default is ``tf.GraphKeys.SUMMARIES``.
     """
+    if key is None:
+        key = tf.GraphKeys.SUMMARIES
     period = int(period)
     if run_alone:
         return MergeAllSummaries_RunAlone(period, key)

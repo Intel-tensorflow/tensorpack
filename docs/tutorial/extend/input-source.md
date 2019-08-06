@@ -4,12 +4,12 @@
 This tutorial contains some general discussions on the topic of
 "how to read data efficiently to work with TensorFlow",
 and how tensorpack supports these methods.
-You don't have to read it because these are details under the tensorpack interface,
+As a beginner you can skip this tutorial, because these are details under the tensorpack interface,
 but knowing it could help understand the efficiency and choose the best input pipeline for your task.
 
 ## Prepare Data in Parallel
 
-![prefetch](https://cloud.githubusercontent.com/assets/1381301/26525192/36e5de48-4304-11e7-88ab-3b790bd0e028.png)
+![prefetch](./input-source.png)
 
 A common sense no matter what framework you use:
 <center>
@@ -38,7 +38,7 @@ This is one of the reasons why tensorpack is [faster](https://github.com/tensorp
 
 The above discussion is valid regardless of what you use to load/preprocess data,
 either Python code or TensorFlow operators, or a mix of two.
-Both are supported in tensorpack, while we recommend using Python. 
+Both are supported in tensorpack, while we recommend using Python.
 
 ### TensorFlow Reader: Pros
 
@@ -58,7 +58,7 @@ The disadvantage of TF reader is obvious and it's huge: it's __too complicated__
 
 Unlike running a mathematical model, data processing is a complicated and poorly-structured task.
 You need to handle different formats, handle corner cases, noisy data, combination of data.
-Doing these requires condition operations, loops, data structures, sometimes even exception handling. 
+Doing these requires condition operations, loops, data structures, sometimes even exception handling.
 These operations are __naturally not the right task for a symbolic graph__.
 
 Let's take a look at what users are asking for `tf.data`:
@@ -84,24 +84,27 @@ You just need the right interface to connect Python to the graph directly, effic
 
 ## InputSource
 
-`InputSource` is an abstract interface in tensorpack, to describe where the inputs come from and how they enter the graph.
-For example,
+`InputSource` is an abstract interface used by tensorpack trainers, to describe where the inputs come from and how they enter the graph.
+Some choices are:
 
 1. [FeedInput](../modules/input_source.html#tensorpack.input_source.FeedInput):
-	Come from a DataFlow and get fed to the graph (slow).
+	Data come from a DataFlow and get fed to the graph (slow).
 2. [QueueInput](../modules/input_source.html#tensorpack.input_source.QueueInput):
-  Come from a DataFlow and get buffered on CPU by a TF queue.
+    Data come from a DataFlow and get buffered on CPU by a TF queue.
 3. [StagingInput](../modules/input_source.html#tensorpack.input_source.StagingInput):
-	Come from some `InputSource`, then prefetched on GPU by a TF StagingArea.
-4. [TFDatasetInput](http://tensorpack.readthedocs.io/en/latest/modules/input_source.html#tensorpack.input_source.TFDatasetInput)
+	Come from some other `InputSource`, then prefetched on GPU by a TF StagingArea.
+4. [TFDatasetInput](../modules/input_source.html#tensorpack.input_source.TFDatasetInput)
 	Come from a `tf.data.Dataset`.
-5. [dataflow_to_dataset](http://tensorpack.readthedocs.io/en/latest/modules/input_source.html#tensorpack.input_source.TFDatasetInput.dataflow_to_dataset)
-	Come from a DataFlow, and further processed by `tf.data.Dataset`.
+5. [dataflow_to_dataset](../modules/input_source.html#tensorpack.input_source.TFDatasetInput.dataflow_to_dataset)
+	Come from a DataFlow, and then lfurther processed by utilities in `tf.data.Dataset`.
 6. [TensorInput](../modules/input_source.html#tensorpack.input_source.TensorInput):
 	Come from some tensors you define (can be reading ops, for example).
-7. [ZMQInput](http://tensorpack.readthedocs.io/en/latest/modules/input_source.html#tensorpack.input_source.ZMQInput)
+7. [ZMQInput](../modules/input_source.html#tensorpack.input_source.ZMQInput)
 	Come from some ZeroMQ pipe, where the reading/preprocessing may happen in a different process or even a different machine.
 
-Typically, we recommend `QueueInput + StagingInput` as it's good for most use cases.
+Typically, we recommend using `DataFlow + QueueInput` as it's good for most use cases.
 If your data has to come from a separate process for whatever reasons, use `ZMQInput`.
-If you still like to use TF reading ops, define a `tf.data.Dataset` and use `TFDatasetInput`.
+If you need to use TF reading ops directly, either define a `tf.data.Dataset`
+and use `TFDatasetInput`, or use `TensorInput`.
+
+Refer to the documentation of these `InputSource` for more details.

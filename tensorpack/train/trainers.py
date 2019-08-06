@@ -1,31 +1,27 @@
 # -*- coding: utf-8 -*-
 # File: trainers.py
 
-import os
-import tensorflow as tf
 import multiprocessing as mp
+import os
+import sys
+import tensorflow as tf
 
-from ..callbacks import RunOp
+from ..callbacks import CallbackFactory, RunOp
+from ..graph_builder.distributed import DistributedParameterServerBuilder, DistributedReplicatedBuilder
+from ..graph_builder.training import (
+    AsyncMultiGPUBuilder, SyncMultiGPUParameterServerBuilder, SyncMultiGPUReplicatedBuilder)
+from ..graph_builder.utils import override_to_local_variable
+from ..input_source import FeedfreeInput, QueueInput
+from ..tfutils import get_global_step_var
+from ..tfutils.distributed import get_distributed_session_creator
 from ..tfutils.sesscreate import NewSessionCreator
-
+from ..tfutils.tower import TrainTowerContext
 from ..utils import logger
 from ..utils.argtools import map_arg
 from ..utils.develop import HIDE_DOC
-from ..tfutils import get_global_step_var
-from ..tfutils.distributed import get_distributed_session_creator
-from ..tfutils.tower import TrainTowerContext
-from ..input_source import QueueInput, FeedfreeInput
-
-from ..graph_builder.training import (
-    SyncMultiGPUParameterServerBuilder,
-    SyncMultiGPUReplicatedBuilder,
-    AsyncMultiGPUBuilder)
-from ..graph_builder.distributed import DistributedReplicatedBuilder, DistributedParameterServerBuilder
-from ..graph_builder.utils import override_to_local_variable
-
 from .tower import SingleCostTrainer
 
-__all__ = ['SimpleTrainer',
+__all__ = ['NoOpTrainer', 'SimpleTrainer',
            'QueueInputTrainer',
            'SyncMultiGPUTrainer',
            'SyncMultiGPUTrainerReplicated',
@@ -52,8 +48,20 @@ class SimpleTrainer(SingleCostTrainer):
         with TrainTowerContext(''):
             grads = self._make_get_grad_fn(input, get_cost_fn, get_opt_fn)()
             opt = get_opt_fn()
-            self.train_op = opt.apply_gradients(grads, name='min_op')
+            self.train_op = opt.apply_gradients(grads, name='train_op')
         return []
+
+
+class NoOpTrainer(SimpleTrainer):
+    """
+    A special trainer that builds the graph (if given a tower function)
+    and does nothing in each step.
+    It is used to only run the callbacks.
+
+    Note that `steps_per_epoch` and `max_epochs` are still valid options.
+    """
+    def run_step(self):
+        self.hooked_sess.run([])
 
 
 # Only exists for type check & back-compatibility
@@ -89,8 +97,9 @@ class SyncMultiGPUTrainerParameterServer(SingleCostTrainer):
     def _setup_graph(self, input, get_cost_fn, get_opt_fn):
         if len(self.devices) > 1:
             assert isinstance(input, FeedfreeInput), input
-        self.train_op = self._builder.build(
-            self._make_get_grad_fn(input, get_cost_fn, get_opt_fn), get_opt_fn)
+        tower_fn = self._make_get_grad_fn(input, get_cost_fn, get_opt_fn)
+        grad_list = self._builder.call_for_each_tower(tower_fn)
+        self.train_op = self._builder.build(grad_list, get_opt_fn)
         return []
 
 
@@ -128,8 +137,9 @@ class AsyncMultiGPUTrainer(SingleCostTrainer):
     def _setup_graph(self, input, get_cost_fn, get_opt_fn):
         if len(self.devices) > 1:
             assert isinstance(input, FeedfreeInput), input
-        self.train_op = self._builder.build(
-            self._make_get_grad_fn(input, get_cost_fn, get_opt_fn), get_opt_fn)
+        tower_fn = self._make_get_grad_fn(input, get_cost_fn, get_opt_fn)
+        grad_list = self._builder.call_for_each_tower(tower_fn)
+        self.train_op = self._builder.build(grad_list, get_opt_fn)
         return []
 
 
@@ -142,8 +152,17 @@ class SyncMultiGPUTrainerReplicated(SingleCostTrainer):
     List of GPU ids.
     """
 
+    BROADCAST_EVERY_EPOCH = True
+    """
+    Whether to broadcast the variables every epoch.
+    Theoretically this is a no-op (because the variables
+    are supposed to be in-sync).
+    But this cheap operation may help prevent
+    certain numerical issues in practice.
+    """
+
     @map_arg(gpus=_int_to_range)
-    def __init__(self, gpus, average=True, mode=None, use_nccl=None):
+    def __init__(self, gpus, average=True, mode=None):
         """
         Args:
             gpus (int or [int]): list of GPU ids.
@@ -152,14 +171,12 @@ class SyncMultiGPUTrainerReplicated(SingleCostTrainer):
                 Supported values: ['nccl', 'hierarchical', 'cpu'].
                 Default to pick automatically by heuristics.
                 These modes may have slight (within 5%) differences in speed.
+                "hierarchical" mode was designed for DGX-like 8GPU machines.
         """
         self.devices = gpus
 
-        if use_nccl is not None:
-            mode = 'nccl' if use_nccl else None
-            logger.warn("use_nccl option was deprecated! Use the `mode` option instead!")
         if mode is None:
-            mode = 'hierarchical' if len(gpus) >= 8 else 'nccl'
+            mode = 'hierarchical' if len(gpus) == 8 else 'nccl'
         mode = mode.lower()
 
         self._builder = SyncMultiGPUReplicatedBuilder(gpus, average, mode)
@@ -168,12 +185,16 @@ class SyncMultiGPUTrainerReplicated(SingleCostTrainer):
     def _setup_graph(self, input, get_cost_fn, get_opt_fn):
         if len(self.devices) > 1:
             assert isinstance(input, FeedfreeInput), input
-        self.train_op, post_init_op = self._builder.build(
-            self._make_get_grad_fn(input, get_cost_fn, get_opt_fn), get_opt_fn)
+        tower_fn = self._make_get_grad_fn(input, get_cost_fn, get_opt_fn)
+        grad_list = self._builder.call_for_each_tower(tower_fn)
+        self.train_op, post_init_op = self._builder.build(grad_list, get_opt_fn)
 
         cb = RunOp(
             post_init_op,
-            run_before=True, run_as_trigger=True, verbose=True)
+            run_before=True,
+            run_as_trigger=self.BROADCAST_EVERY_EPOCH,
+            verbose=True)
+        cb.name_scope = "SyncVariables"
         return [cb]
 
 
@@ -296,7 +317,7 @@ class HorovodTrainer(SingleCostTrainer):
     .. code-block:: bash
 
         # First, change trainer to HorovodTrainer(), then
-        CUDA_VISIBLE_DEVICES=0,1,2,3 mpirun -np 4 --output-filename mylog python train.py
+        CUDA_VISIBLE_DEVICES=0,1,2,3 NCCL_DEBUG=INFO mpirun -np 4 --output-filename mylog python train.py
 
     To use for distributed training:
 
@@ -305,7 +326,7 @@ class HorovodTrainer(SingleCostTrainer):
         # First, change trainer to HorovodTrainer(), then
         mpirun -np 8 -H server1:4,server2:4  \\
             -bind-to none -map-by slot \\
-            --output-filename mylog  -x LD_LIBRARY_PATH \\
+            --output-filename mylog -x NCCL_DEBUG=INFO -x LD_LIBRARY_PATH \\
             python train.py
         # Add other environment variables you need by -x, e.g. PYTHONPATH, PATH.
         # If using all GPUs, you can always skip the `CUDA_VISIBLE_DEVICES` option.
@@ -316,26 +337,26 @@ class HorovodTrainer(SingleCostTrainer):
            for Horovod installation and in the MPI command line.
            See Horovod docs for details.
 
-        2. Due to a TF bug, you must not initialize CUDA context before the trainer starts training.
+        2. Due to a TF bug (#8136), you must not initialize CUDA context before the trainer starts training.
            Therefore TF functions like `is_gpu_available()` or `list_local_devices()`
            must be avoided.
 
         2. MPI does not like `fork()`. If your dataflow contains multiprocessing, it may cause problems.
 
-        3. MPI sometimes fails to kill all processes. Be sure to check it afterwards.
+        3. MPI sometimes fails to kill all processes in the end. Be sure to check it afterwards.
 
         4. Keep in mind that there is one process running the script per GPU, therefore:
 
            + Make sure your InputSource has reasonable randomness.
 
-           + If your data processing is heavy, doing it in a separate dedicated process might be
+           + If your data processing is heavy, doing it in a single dedicated process might be
              a better choice than doing them repeatedly in each process.
 
            + You need to make sure log directories in each process won't conflict.
              You can set it only for the chief process, or set a different one for each process.
 
            + Callbacks have an option to be run only in the chief process, or in all processes.
-             See :meth:`callback.set_chief_only()`. Most callbacks have a reasonable
+             See :meth:`Callback.set_chief_only()`. Most callbacks have a reasonable
              default already, but certain callbacks may not behave properly by default. Report an issue if you find any.
 
            + You can use Horovod API such as `hvd.rank()` to know which process you are and choose
@@ -346,15 +367,29 @@ class HorovodTrainer(SingleCostTrainer):
            for a full example which has handled these common issues.
            This example can train ImageNet in roughly an hour following the paper's setup.
     """
-    def __init__(self, average=True):
+    def __init__(self, average=True, compression=None):
         """
         Args:
             average (bool): whether to average or sum the gradients across processes.
+            compression: `hvd.Compression.fp16` or `hvd.Compression.none`
         """
+        if 'pyarrow' in sys.modules:
+            logger.warn("Horovod and pyarrow may conflict due to pyarrow bugs. "
+                        "Uninstall pyarrow and use msgpack instead.")
+        # lazy import
+        import horovod.tensorflow as _hvd
+        import horovod
+        global hvd
+        hvd = _hvd
+        hvd_version = tuple(map(int, horovod.__version__.split('.')))
+
         hvd.init()
         self.is_chief = hvd.rank() == 0
         self._local_rank = hvd.local_rank()
+        self._rank = hvd.rank()
         self._average = average
+        self._compression = compression
+        self._has_compression = hvd_version >= (0, 15, 0)
         logger.info("[HorovodTrainer] local rank={}".format(self._local_rank))
         super(HorovodTrainer, self).__init__()
 
@@ -366,7 +401,10 @@ class HorovodTrainer(SingleCostTrainer):
         with tf.name_scope("HVDAllReduce"):
             for grad, var in grads:
                 if grad is not None:
-                    avg_grad = hvd.allreduce(grad, average=self._average)
+                    if self._compression is not None and self._has_compression:
+                        avg_grad = hvd.allreduce(grad, average=self._average, compression=self._compression)
+                    else:
+                        avg_grad = hvd.allreduce(grad, average=self._average)
                     averaged_gradients.append((avg_grad, var))
                 else:
                     averaged_gradients.append((None, var))
@@ -378,16 +416,25 @@ class HorovodTrainer(SingleCostTrainer):
             grads = self.allreduce(grads)
 
             opt = get_opt_fn()
-            self.train_op = opt.apply_gradients(grads, name='min_op')
-        with tf.name_scope('horovod_broadcast'):
-            op = hvd.broadcast_global_variables(0)
-        cb = RunOp(
-            op, run_before=True,
-            run_as_trigger=True, verbose=True)
+            self.train_op = opt.apply_gradients(grads, name='train_op')
+
+        def broadcast(self):
+            logger.info("Running horovod broadcast ...")
+            # the op will be created later in initialize()
+            self.trainer._broadcast_op.run()
+
+        cb = CallbackFactory(trigger=broadcast).set_chief_only(False)
         return [cb]
 
     @HIDE_DOC
     def initialize(self, session_creator, session_init):
+        # broadcast_op should be the last setup_graph: it needs to be created
+        # "right before" the graph is finalized,
+        # because it needs to capture all the variables (which may be created by callbacks).
+        with tf.name_scope('horovod_broadcast'):
+            self._broadcast_op = hvd.broadcast_global_variables(0)
+
+        # it's important that our NewSessionCreator does not finalize the graph
         if not isinstance(session_creator, NewSessionCreator):
             raise ValueError(
                 "session_creator has to be `NewSessionCreator` for horovod training! ")
@@ -398,15 +445,19 @@ class HorovodTrainer(SingleCostTrainer):
             session_creator.config.inter_op_parallelism_threads = mp.cpu_count() // hvd.local_size()
         except AttributeError:  # old horovod does not have local_size
             pass
-        super(HorovodTrainer, self).initialize(
-            session_creator, session_init)
+        super(HorovodTrainer, self).initialize(session_creator, session_init)
+
+        # This broadcast belongs to the "intialize" stage
+        # It should not be delayed to the "before_train" stage.
+        # TODO:
+        # 1. a allgather helper to concat strings
+        # 2. check variables on each rank match each other, print warnings, and broadcast the common set.
+        if self.is_chief:
+            logger.info("Broadcasting initialized variables ...")
+        else:
+            logger.info("Rank {} waiting for initialization broadcasting ...".format(self._rank))
+        self.sess.run(self._broadcast_op)
 
 
-from ..utils.develop import create_dummy_class   # noqa
-try:
-    import horovod.tensorflow as hvd
-except ImportError:
-    HorovodTrainer = create_dummy_class('HovorodTrainer', 'horovod')    # noqa
-except Exception:      # could be other than ImportError, e.g. NCCL not found
-    print("Horovod is installed but cannot be imported. Check `python -c 'import horovod.tensorflow'`.")
-    HorovodTrainer = create_dummy_class('HovorodTrainer', 'horovod')    # noqa
+# for lazy import
+hvd = None

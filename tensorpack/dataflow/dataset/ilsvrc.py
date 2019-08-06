@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 # File: ilsvrc.py
 
+import numpy as np
 import os
 import tarfile
-import numpy as np
 import tqdm
 
 from ...utils import logger
+from ...utils.fs import download, get_dataset_path, mkdir_p
 from ...utils.loadcaffe import get_caffe_pb
-from ...utils.fs import mkdir_p, download, get_dataset_path
 from ...utils.timer import timed_operation
 from ..base import RNGDataFlow
 
@@ -25,7 +25,7 @@ class ILSVRCMeta(object):
     def __init__(self, dir=None):
         if dir is None:
             dir = get_dataset_path('ilsvrc_metadata')
-        self.dir = dir
+        self.dir = os.path.expanduser(dir)
         mkdir_p(self.dir)
         f = os.path.join(self.dir, 'synsets.txt')
         if not os.path.isfile(f):
@@ -141,6 +141,7 @@ class ILSVRC12Files(RNGDataFlow):
         Same as in :class:`ILSVRC12`.
         """
         assert name in ['train', 'test', 'val'], name
+        dir = os.path.expanduser(dir)
         assert os.path.isdir(dir), dir
         self.full_dir = os.path.join(dir, name)
         self.name = name
@@ -162,10 +163,10 @@ class ILSVRC12Files(RNGDataFlow):
             fname = os.path.join(self.full_dir, fname)
             assert os.path.isfile(fname), fname
 
-    def size(self):
+    def __len__(self):
         return len(self.imglist)
 
-    def get_data(self):
+    def __iter__(self):
         idxs = np.arange(len(self.imglist))
         if self.shuffle:
             self.rng.shuffle(idxs)
@@ -250,8 +251,8 @@ class ILSVRC12(ILSVRC12Files):
     There are some CMYK / png images, but cv2 seems robust to them.
     https://github.com/tensorflow/models/blob/c0cd713f59cfe44fa049b3120c417cc4079c17e3/research/inception/inception/data/build_imagenet_data.py#L264-L300
     """
-    def get_data(self):
-        for fname, label in super(ILSVRC12, self).get_data():
+    def __iter__(self):
+        for fname, label in super(ILSVRC12, self).__iter__():
             im = cv2.imread(fname, cv2.IMREAD_COLOR)
             assert im is not None, fname
             yield [im, label]
@@ -298,7 +299,7 @@ if __name__ == '__main__':
     ds = ILSVRC12('/home/wyx/data/fake_ilsvrc/', 'train', shuffle=False)
     ds.reset_state()
 
-    for k in ds.get_data():
+    for k in ds:
         from IPython import embed
         embed()
         break

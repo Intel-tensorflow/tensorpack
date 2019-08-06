@@ -3,22 +3,22 @@
 # File: alexnet-dorefa.py
 # Author: Yuxin Wu, Yuheng Zou ({wyx,zyh}@megvii.com)
 
-import cv2
-import tensorflow as tf
 import argparse
 import numpy as np
 import os
 import sys
-
+import cv2
+import tensorflow as tf
 
 from tensorpack import *
+from tensorpack.dataflow import dataset
+from tensorpack.tfutils.sessinit import get_model_loader
 from tensorpack.tfutils.summary import add_param_summary
 from tensorpack.tfutils.varreplace import remap_variables
-from tensorpack.dataflow import dataset
 from tensorpack.utils.gpu import get_num_gpu
 
-from imagenet_utils import get_imagenet_dataflow, fbresnet_augmentor, ImageNetModel
 from dorefa import get_dorefa, ternarize
+from imagenet_utils import ImageNetModel, eval_on_ILSVRC12, fbresnet_augmentor, get_imagenet_dataflow
 
 """
 This is a tensorpack script for the ImageNet results in paper:
@@ -199,6 +199,7 @@ if __name__ == '__main__':
     parser.add_argument('--dorefa', required=True,
                         help='number of bits for W,A,G, separated by comma. W="t" means TTQ')
     parser.add_argument('--run', help='run on a list of images with the pretrained model', nargs='*')
+    parser.add_argument('--eval', action='store_true')
     args = parser.parse_args()
 
     dorefa = args.dorefa.split(',')
@@ -214,6 +215,11 @@ if __name__ == '__main__':
     if args.run:
         assert args.load.endswith('.npz')
         run_image(Model(), DictRestore(dict(np.load(args.load))), args.run)
+        sys.exit()
+    if args.eval:
+        BATCH_SIZE = 128
+        ds = get_data('val')
+        eval_on_ILSVRC12(Model(), get_model_loader(args.load), ds)
         sys.exit()
 
     nr_tower = max(get_num_gpu(), 1)

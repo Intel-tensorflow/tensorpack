@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 # File: cifar-convnet.py
 # Author: Yuxin Wu
-import tensorflow as tf
 import argparse
 import os
+import tensorflow as tf
 
 from tensorpack import *
-from tensorpack.tfutils.summary import *
 from tensorpack.dataflow import dataset
+from tensorpack.tfutils.summary import *
 from tensorpack.utils.gpu import get_num_gpu
+
 
 """
 A small convnet model for Cifar10 or Cifar100 dataset.
@@ -33,7 +34,7 @@ class Model(ModelDesc):
 
     def build_graph(self, image, label):
         is_training = get_current_tower_context().is_training
-        keep_prob = tf.constant(0.5 if is_training else 1.0)
+        drop_rate = tf.constant(0.5 if is_training else 0.0)
 
         if is_training:
             tf.summary.image("train_image", image, 10)
@@ -56,14 +57,14 @@ class Model(ModelDesc):
                 .Conv2D('conv3.1', filters=128, padding='VALID') \
                 .Conv2D('conv3.2', filters=128, padding='VALID') \
                 .FullyConnected('fc0', 1024 + 512, activation=tf.nn.relu) \
-                .tf.nn.dropout(keep_prob) \
+                .Dropout(rate=drop_rate) \
                 .FullyConnected('fc1', 512, activation=tf.nn.relu) \
                 .FullyConnected('linear', out_dim=self.cifar_classnum)()
 
         cost = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')
 
-        correct = tf.to_float(tf.nn.in_top_k(logits, label, 1), name='correct')
+        correct = tf.cast(tf.nn.in_top_k(logits, label, 1), tf.float32, name='correct')
         # monitor training error
         add_moving_summary(tf.reduce_mean(correct, name='accuracy'))
 

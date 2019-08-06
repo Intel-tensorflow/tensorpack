@@ -2,11 +2,11 @@
 # File: registry.py
 
 
-import tensorflow as tf
+import copy
+import re
 from functools import wraps
 import six
-import re
-import copy
+import tensorflow as tf
 
 from ..tfutils.argscope import get_arg_scope
 from ..tfutils.model_utils import get_shape_str
@@ -25,6 +25,10 @@ def _register(name, func):
     if name in ['tf']:
         raise ValueError(logger.error("A layer cannot be named {}".format(name)))
     _LAYER_REGISTRY[name] = func
+
+    # handle alias
+    if name == 'Conv2DTranspose':
+        _register('Deconv2D', func)
 
 
 def get_registered_layer(name):

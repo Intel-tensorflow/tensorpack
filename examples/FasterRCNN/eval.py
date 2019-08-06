@@ -6,6 +6,7 @@ import os
 from collections import namedtuple
 import numpy as np
 import cv2
+import tensorflow as tf
 
 from tensorpack.utils.utils import get_tqdm_kwargs
 
@@ -53,8 +54,67 @@ def fill_full_mask(box, mask, shape):
     ret[y0:y1 + 1, x0:x1 + 1] = mask
     return ret
 
+def DetectOneImageFromFrozenGraph(input_image_np):
 
-def detect_one_image(img, model_func):
+    # Each box represents a part of the image where a particular object was detected.
+    graph = DetectFromFrozenGraph.sessionvalues[0]
+    #config = DetectFromFrozenGraph.sessionvalues[1]
+    pbsession = DetectFromFrozenGraph.sessionvalues[1]    
+    image_tensor = DetectFromFrozenGraph.sessionvalues[2]
+    detection_boxes = DetectFromFrozenGraph.sessionvalues[3]
+    detection_scores = DetectFromFrozenGraph.sessionvalues[4]
+    detection_labels = DetectFromFrozenGraph.sessionvalues[5]
+
+    # Run real inference from the frozen graph.
+    (boxes, scores, labels) = pbsession.run([detection_boxes, detection_scores, detection_labels],feed_dict = {image_tensor : input_image_np})#,options=options, run_metadata=run_metadata )
+    return (boxes, scores, labels)
+class DetectFromFrozenGraph:
+    sessionvalues = []
+
+    def SetupDetectFromFrozenGraph(self, args):
+        dir_path = os.path.dirname(os.path.realpath(__file__))
+        dir_path = dir_path + "/temp/built_graph"
+        frozen_model_path = dir_path + "/" + args.model_name
+
+        print("***********************************************************") 
+        print("Loading and inferencing model: {}".format(frozen_model_path))
+        print("***********************************************************")
+
+        config = tf.ConfigProto()
+        config.allow_soft_placement = True
+        config.intra_op_parallelism_threads = 28
+        config.inter_op_parallelism_threads = 1
+        #with tf.Session(config=config) as pbsession:
+        with tf.Graph().as_default() as tfgraph:
+            with tf.gfile.FastGFile(frozen_model_path,'rb') as f:  # Load pb as graphdef
+                #graph = tf.Graph()
+                graphdef = tf.GraphDef() 
+                graphdef.ParseFromString(f.read()) 
+                #text_format.Merge(f.read(),graphdef) 
+                #pbsession.graph.as_default()
+                with tfgraph.as_default() :
+                    tf.import_graph_def(graphdef, name='')
+                # Definite input and output Tensors for detection_graph
+                image_tensor = tfgraph.get_tensor_by_name('image:0')
+                detection_boxes = tfgraph.get_tensor_by_name('final_boxes:0')
+                detection_scores = tfgraph.get_tensor_by_name('final_probs:0')
+                detection_labels = tfgraph.get_tensor_by_name('final_labels:0')
+                
+                # Get a permanent session object
+                pbsession = tf.Session(graph=tfgraph, config=config)
+                # initialize the session
+                tf.global_variables_initializer()
+
+                # Store all the global variables in the class list.
+                self.sessionvalues.append(tfgraph)
+                #self.sessionvalues.append(config)
+                self.sessionvalues.append(pbsession)                                
+                self.sessionvalues.append(image_tensor)
+                self.sessionvalues.append(detection_boxes)
+                self.sessionvalues.append(detection_scores)
+                self.sessionvalues.append(detection_labels)
+
+def detect_one_image(img, model_func, tfargs=False, setup=False):
     """
     Run detection on one image, using the TF callable.
     This function should handle the preprocessing internally.
@@ -67,12 +127,23 @@ def detect_one_image(img, model_func):
     Returns:
         [DetectionResult]
     """
+    if setup:
+        print("Loading and inferecing from frozen graph and not checkpoint.")
+        print("-----------------------------------------------------------.")
+        detectfrozen = DetectFromFrozenGraph()
+        detectfrozen.SetupDetectFromFrozenGraph(tfargs)
 
     orig_shape = img.shape[:2]
     resizer = CustomResize(cfg.PREPROC.SHORT_EDGE_SIZE, cfg.PREPROC.MAX_SIZE)
     resized_img = resizer.augment(img)
     scale = (resized_img.shape[0] * 1.0 / img.shape[0] + resized_img.shape[1] * 1.0 / img.shape[1]) / 2
-    boxes, probs, labels, *masks = model_func(resized_img)
+    #print(resized_img.shape)
+    if not tfargs.loadfrozenpb:
+        boxes, probs, labels, *masks = model_func(resized_img)
+    else:
+        #print("Detect One Image from frozen graph")
+        boxes, probs, labels, *masks = DetectOneImageFromFrozenGraph(resized_img)
+
     boxes = boxes / scale
     # boxes are already clipped inside the graph, but after the floating point scaling, this may not be true any more.
     boxes = clip_boxes(boxes, orig_shape)
@@ -90,7 +161,7 @@ def detect_one_image(img, model_func):
     return results
 
 
-def eval_coco(df, detect_func):
+def eval_coco(df, detect_func, tfargs=None):
     """
     Args:
         df: a DataFlow which produces (image, image_id)
@@ -101,8 +172,17 @@ def eval_coco(df, detect_func):
     """
     df.reset_state()
     all_results = []
+
+    if tfargs.loadfrozenpb:
+        print("Loading and inferecing from frozen graph and not checkpoint.")
+        print("-----------------------------------------------------------.")
+        detectfrozen = DetectFromFrozenGraph()
+        detectfrozen.SetupDetectFromFrozenGraph(tfargs)
+
     with tqdm.tqdm(total=df.size(), **get_tqdm_kwargs()) as pbar:
         for img, img_id in df.get_data():
+            #print("Nirooooaoaoaoaoa")
+            #print(img.shape)
             results = detect_func(img)
             for r in results:
                 box = r.box

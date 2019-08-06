@@ -2,17 +2,16 @@
 # -*- coding: utf-8 -*-
 # File: mnist-embeddings.py
 
-import numpy as np
 import argparse
+import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-
 
 from tensorpack import *
 from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.utils.gpu import change_gpu
 
-from embedding_data import get_test_data, MnistPairs, MnistTriplets
+from embedding_data import MnistPairs, MnistTriplets, get_test_data
 
 MATPLOTLIB_AVAIBLABLE = False
 try:
@@ -379,7 +378,7 @@ def visualize(model_path, model, algo_name):
     ds = get_test_data()
     ds.reset_state()
 
-    for offset, dp in enumerate(ds.get_data()):
+    for offset, dp in enumerate(ds):
         digit, label = dp
         prediction = pred(digit)[0]
         embed[offset * BATCH_SIZE:offset * BATCH_SIZE + BATCH_SIZE, ...] = prediction

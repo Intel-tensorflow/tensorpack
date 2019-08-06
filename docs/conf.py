@@ -26,15 +26,29 @@ ON_RTD = (os.environ.get('READTHEDOCS') == 'True')
 
 MOCK_MODULES = ['tabulate', 'h5py',
                 'cv2', 'zmq', 'lmdb',
+                'msgpack', 'msgpack_numpy', 'pyarrow',
                 'sklearn', 'sklearn.datasets',
                 'scipy', 'scipy.misc', 'scipy.io',
                 'tornado', 'tornado.concurrent',
                 'horovod', 'horovod.tensorflow',
-                'pyarrow',
                 'subprocess32', 'functools32']
+
+# it's better to have tensorflow installed (for some docs to show)
+# but it's OK to mock it as well
+try:
+    import tensorflow
+except ImportError:
+    mod = sys.modules['tensorflow'] = mock.Mock(name='tensorflow')
+    mod.__version__ = mod.VERSION = '1.12'
+    MOCK_MODULES.extend(['tensorflow.python.training.monitored_session'])
+    MOCK_MODULES.extend(['tensorflow.python.training'])
+    MOCK_MODULES.extend(['tensorflow.python.client'])
+    MOCK_MODULES.extend(['tensorflow.contrib.graph_editor'])
+
 for mod_name in MOCK_MODULES:
     sys.modules[mod_name] = mock.Mock(name=mod_name)
 sys.modules['cv2'].__version__ = '3.2.1'    # fake version
+sys.modules['msgpack'].version = (0, 5, 2)
 
 import tensorpack
 
@@ -356,33 +370,32 @@ def process_signature(app, what, name, obj, options, signature,
 
 _DEPRECATED_NAMES = set([
     # deprecated stuff:
-    'TryResumeTraining',
     'QueueInputTrainer',
-    'SimplePredictBuilder',
-    'LMDBDataPoint',
-    'TFRecordData',
-    'dump_dataflow_to_lmdb',
-    'dump_dataflow_to_tfrecord',
+    'dump_dataflow_to_process_queue',
+    'PrefetchOnGPUs',
+    'DistributedTrainerReplicated',
+    'DistributedTrainerParameterServer',
 
-    # renamed stuff:
+    # renamed items that should not appear in docs
     'DumpTensor',
     'DumpParamAsImage',
-    'StagingInputWrapper',
-    'PeriodicRunHooks',
     'get_nr_gpu',
+    'start_test',  # TestDataSpeed
+    'ThreadedMapData',
+    'TrainingMonitor',
 
     # deprecated or renamed symbolic code
-    'ImageSample',
-    'Deconv2D',
-    'get_scalar_var', 'psnr',
-    'prediction_incorrect', 'huber_loss',
+    'Deconv2D', 'psnr',
+
+    # shouldn't appear in doc:
+    'l2_regularizer', 'l1_regularizer',
 
     # internal only
-    'apply_default_prefetch',
+    'SessionUpdate',
     'average_grads',
     'aggregate_grads',
     'allreduce_grads',
-    'PrefetchOnGPUs',
+    'get_checkpoint_path'
 ])
 
 def autodoc_skip_member(app, what, name, obj, skip, options):
@@ -397,7 +410,7 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
     # Hide some names that are deprecated or not intended to be used
     if name in _DEPRECATED_NAMES:
         return True
-    if name in ['get_data', 'size', 'reset_state']:
+    if name in ['__iter__', '__len__', 'reset_state', 'get_data', 'size']:
         # skip these methods with empty docstring
         if not obj.__doc__ and inspect.isfunction(obj):
             # https://stackoverflow.com/questions/3589311/get-defining-class-of-unbound-method-object-in-python-3

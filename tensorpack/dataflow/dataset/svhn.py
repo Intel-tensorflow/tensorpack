@@ -2,11 +2,11 @@
 # File: svhn.py
 
 
-import os
 import numpy as np
+import os
 
 from ...utils import logger
-from ...utils.fs import get_dataset_path, download
+from ...utils.fs import download, get_dataset_path
 from ..base import RNGDataFlow
 
 __all__ = ['SVHNDigit']
@@ -49,10 +49,10 @@ class SVHNDigit(RNGDataFlow):
         self.Y[self.Y == 10] = 0
         SVHNDigit._Cache[name] = (self.X, self.Y)
 
-    def size(self):
+    def __len__(self):
         return self.X.shape[0]
 
-    def get_data(self):
+    def __iter__(self):
         n = self.X.shape[0]
         idxs = np.arange(n)
         if self.shuffle:
@@ -62,14 +62,18 @@ class SVHNDigit(RNGDataFlow):
             yield [self.X[k], self.Y[k]]
 
     @staticmethod
-    def get_per_pixel_mean():
+    def get_per_pixel_mean(names=('train', 'test', 'extra')):
         """
-        return 32x32x3 image
+        Args:
+            names (tuple[str]): names of the dataset split
+
+        Returns:
+            a 32x32x3 image, the mean of all images in the given datasets
         """
-        a = SVHNDigit('train')
-        b = SVHNDigit('test')
-        c = SVHNDigit('extra')
-        return np.concatenate((a.X, b.X, c.X)).mean(axis=0)
+        for name in names:
+            assert name in ['train', 'test', 'extra'], name
+        images = [SVHNDigit(x).X for x in names]
+        return np.concatenate(tuple(images)).mean(axis=0)
 
 
 try:

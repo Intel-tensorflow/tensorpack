@@ -5,15 +5,13 @@ import os
 import tensorflow as tf
 
 from ..callbacks import (
-    MovingAverageSummary,
-    ProgressBar, MergeAllSummaries,
-    TFEventWriter, JSONWriter, ScalarPrinter, RunUpdateOps)
+    JSONWriter, MergeAllSummaries, MovingAverageSummary, ProgressBar, RunUpdateOps, ScalarPrinter, TFEventWriter)
 from ..dataflow.base import DataFlow
 from ..graph_builder.model_desc import ModelDescBase
-from ..utils import logger
-from ..tfutils.sessinit import SessionInit, SaverRestore, JustCurrentSession
-from ..tfutils.sesscreate import NewSessionCreator
 from ..input_source import InputSource
+from ..tfutils.sesscreate import NewSessionCreator
+from ..tfutils.sessinit import SaverRestore, SessionInit
+from ..utils import logger
 
 __all__ = ['TrainConfig', 'AutoResumeTrainConfig', 'DEFAULT_CALLBACKS', 'DEFAULT_MONITORS']
 
@@ -52,6 +50,9 @@ def DEFAULT_MONITORS():
 class TrainConfig(object):
     """
     A collection of options to be used for single-cost trainers.
+
+    Note that you do not have to use :class:`TrainConfig`.
+    You can use the API of :class:`Trainer` directly, to have more fine-grained control of the training.
     """
 
     def __init__(self,
@@ -67,16 +68,23 @@ class TrainConfig(object):
             data (InputSource):
             model (ModelDesc):
 
-            callbacks (list): a list of :class:`Callback` to perform during training.
-            extra_callbacks (list): the same as ``callbacks``. This argument
+            callbacks (list[Callback]): a list of :class:`Callback` to use during training.
+            extra_callbacks (list[Callback]): This argument
                 is only used to provide the defaults in addition to ``callbacks``.
-                The list of callbacks that will be used in the end is ``callbacks + extra_callbacks``.
+                The list of callbacks that will be used in the end is simply ``callbacks + extra_callbacks``.
 
-                It is usually left as None and the default value for this
-                option will be the return value of :meth:`train.DEFAULT_CALLBACKS()`.
+                It is usually left as None, and the default value for this argument is :func:`DEFAULT_CALLBACKS()`.
                 You can override it when you don't like any of the default callbacks.
-            monitors (list): a list of :class:`TrainingMonitor`.
-                Defaults to the return value of :meth:`train.DEFAULT_MONITORS()`.
+                For example, if you'd like to let the progress bar print tensors, you can use
+
+                .. code-block:: none
+
+                    extra_callbacks=[ProgressBar(names=['name']),
+                                     MovingAverageSummary(),
+                                     MergeAllSummaries(),
+                                     RunUpdateOps()]
+
+            monitors (list[MonitorBase]): Defaults to :func:`DEFAULT_MONITORS()`.
 
             session_creator (tf.train.SessionCreator): Defaults to :class:`sesscreate.NewSessionCreator()`
                 with the config returned by :func:`tfutils.get_default_sess_config()`.
@@ -85,38 +93,40 @@ class TrainConfig(object):
 
             starting_epoch (int): The index of the first epoch.
             steps_per_epoch (int): the number of steps (defined by :meth:`Trainer.run_step`) to run in each epoch.
-                Defaults to the input data size.
+                Defaults to the input data size. You may want to divide it by the #GPUs in multi-GPU training.
             max_epoch (int): maximum number of epoch to run training.
         """
 
         # TODO type checker decorator
-        def assert_type(v, tp):
-            assert isinstance(v, tp), v.__class__
+        def assert_type(v, tp, name):
+            assert isinstance(v, tp), \
+                "{} has to be type '{}', but an object of type '{}' found.".format(
+                    name, tp.__name__, v.__class__.__name__)
 
         # process data & model
         assert data is None or dataflow is None, "dataflow and data cannot be both presented in TrainConfig!"
         if dataflow is not None:
-            assert_type(dataflow, DataFlow)
+            assert_type(dataflow, DataFlow, 'dataflow')
         if data is not None:
-            assert_type(data, InputSource)
+            assert_type(data, InputSource, 'data')
         self.dataflow = dataflow
         self.data = data
 
         if model is not None:
-            assert_type(model, ModelDescBase)
+            assert_type(model, ModelDescBase, 'model')
         self.model = model
 
         if callbacks is not None:
-            assert_type(callbacks, list)
+            assert_type(callbacks, list, 'callbacks')
         self.callbacks = callbacks
         if extra_callbacks is not None:
-            assert_type(extra_callbacks, list)
+            assert_type(extra_callbacks, list, 'extra_callbacks')
         self.extra_callbacks = extra_callbacks
         if monitors is not None:
-            assert_type(monitors, list)
+            assert_type(monitors, list, 'monitors')
         self.monitors = monitors
         if session_init is not None:
-            assert_type(session_init, SessionInit)
+            assert_type(session_init, SessionInit, 'session_init')
         self.session_init = session_init
 
         if session_creator is None:
@@ -131,13 +141,13 @@ class TrainConfig(object):
         if steps_per_epoch is None:
             try:
                 if dataflow is not None:
-                    steps_per_epoch = dataflow.size()
+                    steps_per_epoch = len(dataflow)
                 elif data is not None:
                     steps_per_epoch = data.size()
                 else:
                     raise NotImplementedError()
             except NotImplementedError:
-                logger.error("You must set `TrainConfig(steps_per_epoch)` if data.size() is not available.")
+                logger.error("You must set `TrainConfig(steps_per_epoch)` if the size of your input is not available.")
                 raise
         else:
             steps_per_epoch = int(steps_per_epoch)
@@ -145,33 +155,6 @@ class TrainConfig(object):
 
         self.starting_epoch = int(starting_epoch)
         self.max_epoch = int(max_epoch)
-
-        if 'nr_tower' in kwargs:
-            self.nr_tower = kwargs.pop('nr_tower')
-        if 'tower' in kwargs:
-            self.tower = kwargs.pop('tower')
-        else:
-            self.tower = [0]
-        assert len(kwargs) == 0, "Unknown arguments: {}".format(kwargs.keys())
-
-    @property
-    def nr_tower(self):
-        logger.warn("TrainConfig.nr_tower was deprecated! Set the number of GPUs on the trainer instead!")
-        logger.warn("See https://github.com/tensorpack/tensorpack/issues/458 for more information.")
-        return len(self.tower)
-
-    @nr_tower.setter
-    def nr_tower(self, value):
-        logger.warn("TrainConfig.nr_tower was deprecated! Set the number of GPUs on the trainer instead!")
-        logger.warn("See https://github.com/tensorpack/tensorpack/issues/458 for more information.")
-        self.tower = list(range(value))
-
-    def _deprecated_parsing(self):
-        self.callbacks = self.callbacks or []
-        self.extra_callbacks = DEFAULT_CALLBACKS() if self.extra_callbacks is None else self.extra_callbacks
-        self.callbacks.extend(self.extra_callbacks)
-        self.monitors = DEFAULT_MONITORS() if self.monitors is None else self.monitors
-        self.session_init = self.session_init or JustCurrentSession()
 
 
 class AutoResumeTrainConfig(TrainConfig):
@@ -187,6 +170,12 @@ class AutoResumeTrainConfig(TrainConfig):
 
     You can choose to let the above two option to either overwrite or
     not overwrite user-provided arguments, as explained below.
+
+    Note that the functionality requires the logging directory to obtain
+    necessary information from a previous run.
+    In some cases (e.g. when using Horovod), the directory is not
+    available, or the directories are different for different workers,
+    then this class may not function properly.
     """
     def __init__(self, always_resume=True, **kwargs):
         """
@@ -199,16 +188,18 @@ class AutoResumeTrainConfig(TrainConfig):
         Note:
             The main goal of this class is to let a training job to resume
             without changing any line of code or command line arguments.
-            So it's useful to let resume take priority over user-provided arguments sometimes:
+            So it's useful to let resume take priority over user-provided arguments sometimes.
 
-            If your training starts from a pre-trained model,
+            For example: if your training starts from a pre-trained model,
             you would want it to use user-provided model loader at the
             beginning, but a "resume" model loader when the job was
             interrupted and restarted.
         """
+        found_sessinit = False
         if always_resume or 'session_init' not in kwargs:
             sessinit = self._get_sessinit_resume()
             if sessinit is not None:
+                found_sessinit = True
                 path = sessinit.path
                 if 'session_init' in kwargs:
                     logger.info("Found checkpoint at {}. "
@@ -217,13 +208,17 @@ class AutoResumeTrainConfig(TrainConfig):
                     logger.info("Will load checkpoint at {}.".format(path))
                 kwargs['session_init'] = sessinit
 
+        found_last_epoch = False
         if always_resume or 'starting_epoch' not in kwargs:
             last_epoch = self._get_last_epoch()
             if last_epoch is not None:
+                found_last_epoch = True
                 now_epoch = last_epoch + 1
                 logger.info("Found history statistics from JSON. "
-                            "Overwrite the starting epoch to epoch #{}.".format(now_epoch))
+                            "Setting starting_epoch to {}.".format(now_epoch))
                 kwargs['starting_epoch'] = now_epoch
+        assert found_sessinit == found_last_epoch, \
+            "Found SessionInit={}, Found Last Epoch={}".format(found_sessinit, found_last_epoch)
 
         super(AutoResumeTrainConfig, self).__init__(**kwargs)
 

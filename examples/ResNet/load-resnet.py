@@ -4,20 +4,20 @@
 # Author: Eric Yujia Huang <yujiah1@andrew.cmu.edu>
 #         Yuxin Wu
 
-import cv2
-import functools
-import tensorflow as tf
 import argparse
-import re
+import functools
 import numpy as np
+import re
+import cv2
 import six
+import tensorflow as tf
 
 from tensorpack import *
-from tensorpack.utils import logger
 from tensorpack.dataflow.dataset import ILSVRCMeta
+from tensorpack.utils import logger
 
-from imagenet_utils import eval_on_ILSVRC12, get_imagenet_dataflow, ImageNetModel
-from resnet_model import resnet_group, resnet_bottleneck
+from imagenet_utils import ImageNetModel, eval_on_ILSVRC12, get_imagenet_dataflow
+from resnet_model import resnet_bottleneck, resnet_group
 
 DEPTH = None
 CFG = {
@@ -47,10 +47,10 @@ class Model(ModelDesc):
             logits = (LinearWrap(image)
                       .Conv2D('conv0', 64, 7, strides=2, activation=BNReLU, padding='VALID')
                       .MaxPooling('pool0', 3, strides=2, padding='SAME')
-                      .apply(resnet_group, 'group0', bottleneck, 64, blocks[0], 1)
-                      .apply(resnet_group, 'group1', bottleneck, 128, blocks[1], 2)
-                      .apply(resnet_group, 'group2', bottleneck, 256, blocks[2], 2)
-                      .apply(resnet_group, 'group3', bottleneck, 512, blocks[3], 2)
+                      .apply2(resnet_group, 'group0', bottleneck, 64, blocks[0], 1)
+                      .apply2(resnet_group, 'group1', bottleneck, 128, blocks[1], 2)
+                      .apply2(resnet_group, 'group2', bottleneck, 256, blocks[2], 2)
+                      .apply2(resnet_group, 'group3', bottleneck, 512, blocks[3], 2)
                       .GlobalAvgPooling('gap')
                       .FullyConnected('linear', 1000)())
         tf.nn.softmax(logits, name='prob')

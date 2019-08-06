@@ -6,6 +6,8 @@ a __Python generator__ which yields preprocessed ImageNet images and labels as f
 Since it is simply a generator interface, you can use the DataFlow in any Python-based frameworks (e.g. PyTorch, Keras)
 or your own code as well.
 
+
+
 **What we are going to do**: We'll use ILSVRC12 dataset, which contains 1.28 million images.
 The original images (JPEG compressed) are 140G in total.
 The average resolution is about 400x350 <sup>[[1]]</sup>.
@@ -20,15 +22,19 @@ Some things to know before reading:
 	 This tutorial could be a bit complicated for people new to system architectures, but you do need these to be able to run fast enough on ImageNet-scale dataset.
 2. Having a fast Python generator **alone** may or may not improve your overall training speed.
 	 You need mechanisms to hide the latency of **all** preprocessing stages, as mentioned in the
-	 [previous tutorial](input-source.html).
+	 [InputSource tutorial](extend/input-source.html).
 3. Reading training set and validation set are different.
 	 In training it's OK to reorder, regroup, or even duplicate some datapoints, as long as the
 	 data distribution roughly stays the same.
 	 But in validation we often need the exact set of data, to be able to compute a correct and comparable score.
 	 This will affect how we build the DataFlow.
 4. The actual performance would depend on not only the disk, but also memory (for caching) and CPU (for data processing).
-	 You may need to tune the parameters (#processes, #threads, size of buffer, etc.)
-	 or change the pipeline for new tasks and new machines to achieve the best performance.
+	You may need to tune the parameters (#processes, #threads, size of buffer, etc.)
+	or change the pipeline for new tasks and new machines to achieve the best performance.
+    The solutions in this tutorial may not help you.
+    To improve your own DataFlow, read the 
+    [performance tuning tutorial](performance-tuning.html#investigate-dataflow)
+    before doing any optimizations.
 
 The benchmark code for this tutorial can be found in [tensorpack/benchmarks](https://github.com/tensorpack/benchmarks/tree/master/ImageNet),
 including comparison with a similar (but simpler) pipeline built with `tf.data`.
@@ -143,8 +149,8 @@ We can also dump the dataset into one single LMDB file and read it sequentially.
 ```python
 from tensorpack.dataflow import *
 class BinaryILSVRC12(dataset.ILSVRC12Files):
-    def get_data(self):
-        for fname, label in super(BinaryILSVRC12, self).get_data():
+    def __iter__(self):
+        for fname, label in super(BinaryILSVRC12, self).__iter__():
             with open(fname, 'rb') as f:
                 jpeg = f.read()
             jpeg = np.asarray(bytearray(jpeg), dtype='uint8')

@@ -3,19 +3,18 @@
 # File: steering-filter.py
 
 import argparse
+import multiprocessing
 import numpy as np
-import tensorflow as tf
 import cv2
+import tensorflow as tf
 from scipy.signal import convolve2d
 from six.moves import range, zip
-import multiprocessing
-
 
 from tensorpack import *
-from tensorpack.utils import logger
-from tensorpack.utils.viz import *
-from tensorpack.utils.argtools import shape2d, shape4d
 from tensorpack.dataflow import dataset
+from tensorpack.utils import logger
+from tensorpack.utils.argtools import shape2d, shape4d
+from tensorpack.utils.viz import *
 
 BATCH = 32
 SHAPE = 64
@@ -123,9 +122,6 @@ class Model(ModelDesc):
     def build_graph(self, theta, image, gt_image, gt_filter):
         kernel_size = 9
 
-        image = image
-        gt_image = gt_image
-
         theta = tf.reshape(theta, [BATCH, 1, 1, 1]) - np.pi
         image = tf.reshape(image, [BATCH, SHAPE, SHAPE, 1])
         gt_image = tf.reshape(gt_image, [BATCH, SHAPE, SHAPE, 1])
@@ -214,8 +210,8 @@ class ThetaImages(ProxyDataFlow, RNGDataFlow):
         ProxyDataFlow.reset_state(self)
         RNGDataFlow.reset_state(self)
 
-    def get_data(self):
-        for image, label in self.ds.get_data():
+    def __iter__(self):
+        for image, label in self.ds:
             theta = self.rng.uniform(0, 2 * np.pi)
             filtered_image, gt_filter = ThetaImages.filter_with_theta(image, theta)
             yield [theta, image, filtered_image, gt_filter]
@@ -245,7 +241,7 @@ def get_config():
             OnlineTensorboardExport()
         ],
         model=Model(),
-        steps_per_epoch=dataset_train.size(),
+        steps_per_epoch=len(dataset_train),
         max_epoch=50,
     )
 

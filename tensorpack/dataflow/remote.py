@@ -2,14 +2,18 @@
 # File: remote.py
 
 
+import multiprocessing as mp
 import time
-import tqdm
-
 from collections import deque
-from .base import DataFlow, DataFlowReentrantGuard
+import tqdm
+from six.moves import range
+
 from ..utils import logger
-from ..utils.utils import get_tqdm_kwargs
+from ..utils.concurrency import DIE
 from ..utils.serialize import dumps, loads
+from ..utils.utils import get_tqdm_kwargs
+from .base import DataFlow, DataFlowReentrantGuard
+
 try:
     import zmq
 except ImportError:
@@ -58,14 +62,14 @@ def send_dataflow_zmq(df, addr, hwm=50, format=None, bind=False):
         q = deque(maxlen=INTERVAL)
 
         try:
-            total = df.size()
+            total = len(df)
         except NotImplementedError:
             total = 0
         tqdm_args = get_tqdm_kwargs(leave=True, smoothing=0.8)
         tqdm_args['bar_format'] = tqdm_args['bar_format'] + "{postfix}"
         while True:
             with tqdm.trange(total, **tqdm_args) as pbar:
-                for dp in df.get_data():
+                for dp in df:
                     start = time.time()
                     socket.send(dump_fn(dp), copy=False)
                     q.append(time.time() - start)
@@ -86,7 +90,7 @@ class RemoteDataZMQ(DataFlow):
     Produce data from ZMQ PULL socket(s).
     It is the receiver-side counterpart of :func:`send_dataflow_zmq`, which uses :mod:`tensorpack.utils.serialize`
     for serialization.
-    See http://tensorpack.readthedocs.io/en/latest/tutorial/efficient-dataflow.html#distributed-dataflow
+    See http://tensorpack.readthedocs.io/tutorial/efficient-dataflow.html#distributed-dataflow
 
     Attributes:
         cnt1, cnt2 (int): number of data points received from addr1 and addr2
@@ -117,7 +121,7 @@ class RemoteDataZMQ(DataFlow):
         else:
             socket.connect(addr)
 
-    def get_data(self):
+    def __iter__(self):
         with self._guard:
             try:
                 ctx = zmq.Context()
@@ -154,6 +158,46 @@ class RemoteDataZMQ(DataFlow):
                                 self.cnt2 += 1
             finally:
                 ctx.destroy(linger=0)
+
+
+# for internal use only
+def dump_dataflow_to_process_queue(df, size, nr_consumer):
+    """
+    Convert a DataFlow to a :class:`multiprocessing.Queue`.
+    The DataFlow will only be reset in the spawned process.
+
+    Args:
+        df (DataFlow): the DataFlow to dump.
+        size (int): size of the queue
+        nr_consumer (int): number of consumer of the queue.
+            The producer will add this many of ``DIE`` sentinel to the end of the queue.
+
+    Returns:
+        tuple(queue, process):
+            The process will take data from ``df`` and fill
+            the queue, once you start it. Each element in the queue is (idx,
+            dp). idx can be the ``DIE`` sentinel when ``df`` is exhausted.
+    """
+    q = mp.Queue(size)
+
+    class EnqueProc(mp.Process):
+
+        def __init__(self, df, q, nr_consumer):
+            super(EnqueProc, self).__init__()
+            self.df = df
+            self.q = q
+
+        def run(self):
+            self.df.reset_state()
+            try:
+                for idx, dp in enumerate(self.df):
+                    self.q.put((idx, dp))
+            finally:
+                for _ in range(nr_consumer):
+                    self.q.put((DIE, None))
+
+    proc = EnqueProc(df, q, nr_consumer)
+    return q, proc
 
 
 if __name__ == '__main__':

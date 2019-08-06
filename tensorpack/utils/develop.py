@@ -6,13 +6,16 @@
 """ Utilities for developers only.
 These are not visible to users (not automatically imported). And should not
 appeared in docs."""
-import os
 import functools
-from datetime import datetime
 import importlib
+import os
 import types
+from datetime import datetime
+import six
 
 from . import logger
+
+__all__ = []
 
 
 def create_dummy_class(klass, dependency):
@@ -26,9 +29,19 @@ def create_dummy_class(klass, dependency):
     Returns:
         class: a class object
     """
+    assert not building_rtfd()
+
+    class _DummyMetaClass(type):
+        # throw error on class attribute access
+        def __getattr__(_, __):
+            raise AttributeError("Cannot import '{}', therefore '{}' is not available".format(dependency, klass))
+
+    @six.add_metaclass(_DummyMetaClass)
     class _Dummy(object):
+        # throw error on constructor
         def __init__(self, *args, **kwargs):
             raise ImportError("Cannot import '{}', therefore '{}' is not available".format(dependency, klass))
+
     return _Dummy
 
 
@@ -43,6 +56,8 @@ def create_dummy_func(func, dependency):
     Returns:
         function: a function object
     """
+    assert not building_rtfd()
+
     if isinstance(dependency, (list, tuple)):
         dependency = ','.join(dependency)
 

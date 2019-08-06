@@ -2,8 +2,9 @@
 # File: linearwrap.py
 
 
-import six
 from types import ModuleType
+import six
+
 from .registry import get_registered_layer
 
 __all__ = ['LinearWrap']
@@ -78,6 +79,9 @@ class LinearWrap(object):
         """
         Apply a function on the wrapped tensor. The tensor
         will be the second argument of func.
+
+        This is because many symbolic functions
+        (such as tensorpack's layers) takes 'scope' as the first argument.
 
         Returns:
             LinearWrap: ``LinearWrap(func(args[0], self.tensor(), *args[1:], **kwargs))``.

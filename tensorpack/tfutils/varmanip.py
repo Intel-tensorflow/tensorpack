@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 # File: varmanip.py
 
-
-import six
+import numpy as np
 import os
 import pprint
+import six
 import tensorflow as tf
-import numpy as np
-from ..utils.develop import deprecated
+
 from ..utils import logger
 from .common import get_op_tensor_name
 
@@ -48,28 +47,32 @@ class SessionUpdate(object):
         self.name_map = {v.name: v for v in vars_to_update}
 
     @staticmethod
-    def load_value_to_var(var, val, strict=False):
+    def relaxed_value_for_var(value, var):
         """
-        Call `var.load(val)` with the default session.
+        Returns a relaxed (possibly reshaped/upcast-ed) version of value,
+        to be loaded to the given variable.
 
         Args:
+            value (ndarray): an numpy array to be loaded to var
             var (tf.Variable):
-            strict (bool): Behave less strict if set to False.
+
+        Returns:
+            ndarray: a possibly reshaped or casted version of value
         """
-        if strict:
-            var.load(val)
-            return
+        assert isinstance(var, tf.Variable)
         name = var.op.name
 
         # check incompatible shape
         varshape = tuple(var.get_shape().as_list())
-        if varshape != val.shape:
+        if varshape != value.shape:
             # TODO only allow reshape when shape different by empty axis
-            assert np.prod(varshape) == np.prod(val.shape), \
-                "{}: {}!={}".format(name, varshape, val.shape)
-            logger.warn("Variable {} is reshaped {}->{} during assigning".format(
-                name, val.shape, varshape))
-            val = val.reshape(varshape)
+            if np.prod(varshape) != np.prod(value.shape):
+                raise ValueError(
+                    "Trying to load a tensor of shape {} into the variable '{}' whose shape is {}.".format(
+                        value.shape, name, varshape))
+            logger.warn("The tensor is reshaped from {} to {} when assigned to '{}'".format(
+                value.shape, varshape, name))
+            value = value.reshape(varshape)
 
         # fix some common type incompatibility problems, but not all
         def upcast(vartype, valtype):
@@ -80,20 +83,17 @@ class SessionUpdate(object):
                 return np.int64 if vartype == tf.int64 else np.int32
             return None
 
-        if hasattr(val, 'dtype'):
+        if hasattr(value, 'dtype'):
             vartype = var.value().dtype
-            if vartype != val.dtype:
-                msg = "Variable {} has dtype {} but was given a value of dtype {}.".format(name, vartype, val.dtype)
-                newtype = upcast(var.dtype, val.dtype)
+            if vartype != value.dtype:
+                msg = "Variable {} has dtype {} but was given a value of dtype {}.".format(name, vartype, value.dtype)
+                newtype = upcast(var.dtype.base_dtype, value.dtype)
                 if newtype is not None:
-                    val = newtype(val)
+                    value = newtype(value)
                     logger.warn(msg + " Load it after casting!")
                 else:
-                    assert vartype == val.dtype, msg
-        try:
-            var.load(val)
-        except tf.errors.InvalidArgumentError:
-            logger.exc("Cannot load this value to the variable {}".format(name))
+                    assert vartype == value.dtype, msg
+        return value
 
     def update(self, prms):
         """
@@ -102,16 +102,21 @@ class SessionUpdate(object):
                 Any name in prms must be in the graph and in vars_to_update.
         """
         with self.sess.as_default():
+            fetches = []
+            feeds = {}
             for name, value in six.iteritems(prms):
                 assert name in self.name_map
-                v = self.name_map[name]
-                SessionUpdate.load_value_to_var(v, value)
+                var = self.name_map[name]
+                fetches.append(var.initializer)
+                # This is the implementation of `var.load`
+                feeds[var.initializer.inputs[1]] = SessionUpdate.relaxed_value_for_var(value, var)
+            self.sess.run(fetches, feed_dict=feeds)
 
 
 def dump_session_params(path):
     """
     Dump value of all TRAINABLE + MODEL variables to a dict, and save as
-    npz format (loadable by :class:`DictRestore`).
+    npz format (loadable by :func:`sessinit.get_model_loader`).
 
     Args:
         path(str): the file name to save the parameters. Must ends with npz.
@@ -203,11 +208,6 @@ def load_chkpt_vars(model_path):
     return result
 
 
-@deprecated("Renamed to 'load_chkpt_vars!'", "2018-04-20")
-def dump_chkpt_vars(model_path):
-    return load_chkpt_vars(model_path)
-
-
 def is_training_name(name):
     """
     **Guess** if this variable is only used in training.
@@ -226,7 +226,7 @@ def is_training_name(name):
         return True
     if name.endswith('/Adagrad'):
         return True
-    if name.startswith('EMA/'):  # all the moving average summaries
+    if name.startswith('EMA/') or '/EMA/' in name:  # all the moving average summaries
         return True
     if name.startswith('AccumGrad') or name.endswith('/AccumGrad'):
         return True

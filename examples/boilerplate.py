@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 # Author: Your Name <your@email.com>
 
-import os
 import argparse
+import os
 import tensorflow as tf
 
 from tensorpack import *
@@ -55,7 +55,7 @@ def get_config():
             ModelSaver(),
             InferenceRunner(ds_test, [ScalarStats('total_costs')]),
         ],
-        steps_per_epoch=ds_train.size(),
+        steps_per_epoch=len(ds_train),
         max_epoch=100,
     )
 
@@ -71,8 +71,6 @@ if __name__ == '__main__':
 
     config = get_config()
 
-    if args.gpu:
-        config.nr_tower = len(args.gpu.split(','))
     if args.load:
         config.session_init = SaverRestore(args.load)
 

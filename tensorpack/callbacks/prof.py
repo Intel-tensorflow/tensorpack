@@ -2,19 +2,20 @@
 # File: prof.py
 
 
-import os
-import numpy as np
 import multiprocessing as mp
+import numpy as np
+import os
 import time
-from six.moves import map
 import tensorflow as tf
+from six.moves import map
 from tensorflow.python.client import timeline
 
-from .base import Callback
+from ..tfutils.common import gpu_available_in_session
 from ..utils import logger
 from ..utils.concurrency import ensure_proc_terminate, start_proc_mask_signal
-from ..utils.gpu import get_nr_gpu
+from ..utils.gpu import get_num_gpu
 from ..utils.nvml import NVMLContext
+from .base import Callback
 
 __all__ = ['GPUUtilizationTracker', 'GraphProfiler', 'PeakMemoryTracker']
 
@@ -22,7 +23,7 @@ __all__ = ['GPUUtilizationTracker', 'GraphProfiler', 'PeakMemoryTracker']
 class GPUUtilizationTracker(Callback):
     """ Summarize the average GPU utilization within an epoch.
 
-    It will start a process to run `nvidia-smi` every second
+    It will start a process to run ``nvidia-smi`` every second
     within the epoch (the trigger_epoch time was not included),
     and write average utilization to monitors.
 
@@ -40,7 +41,7 @@ class GPUUtilizationTracker(Callback):
         if devices is None:
             env = os.environ.get('CUDA_VISIBLE_DEVICES')
             if env is None:
-                self._devices = list(range(get_nr_gpu()))
+                self._devices = list(range(get_num_gpu()))
                 logger.warn("[GPUUtilizationTracker] Both devices and CUDA_VISIBLE_DEVICES are None! "
                             "Will monitor all {} visible GPUs!".format(len(self._devices)))
             else:
@@ -53,6 +54,7 @@ class GPUUtilizationTracker(Callback):
         assert len(self._devices), "[GPUUtilizationTracker] No GPU device given!"
 
     def _before_train(self):
+        assert gpu_available_in_session(), "[GPUUtilizationTracker] needs GPU!"
         self._evt = mp.Event()
         self._stop_evt = mp.Event()
         self._queue = mp.Queue()
@@ -103,9 +105,10 @@ class GPUUtilizationTracker(Callback):
                         if stop_evt.is_set():   # or on exit
                             return
                         evt.clear()
-                        # Ignore the last datapoint. Usually is zero, makes us underestimate the util.
-                        stats -= data
-                        cnt -= 1
+                        if cnt > 1:
+                            # Ignore the last datapoint. Usually is zero, makes us underestimate the util.
+                            stats -= data
+                            cnt -= 1
                         rst_queue.put(stats / cnt)
                         break
 
@@ -210,6 +213,9 @@ class PeakMemoryTracker(Callback):
             with tf.device(dev):
                 ops.append(MaxBytesInUse())
         self._fetches = tf.train.SessionRunArgs(fetches=ops)
+
+    def _before_train(self):
+        assert gpu_available_in_session(), "PeakMemoryTracker only supports GPU!"
 
     def _before_run(self, _):
         if self.local_step == self.trainer.steps_per_epoch - 1:

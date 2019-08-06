@@ -3,14 +3,14 @@
 # File: cifar10-preact18-mixup.py
 # Author: Tao Hu <taohu620@gmail.com>,  Yauheni Selivonchyk <y.selivonchyk@gmail.com>
 
-import numpy as np
 import argparse
+import numpy as np
 import os
 import tensorflow as tf
 
 from tensorpack import *
-from tensorpack.tfutils.summary import *
 from tensorpack.dataflow import dataset
+from tensorpack.tfutils.summary import *
 
 BATCH_SIZE = 128
 CLASS_NUM = 10
@@ -67,8 +67,8 @@ class ResNet_Cifar(ModelDesc):
         ce_cost = tf.nn.softmax_cross_entropy_with_logits(labels=label, logits=logits)
         ce_cost = tf.reduce_mean(ce_cost, name='cross_entropy_loss')
 
-        single_label = tf.to_int32(tf.argmax(label, axis=1))
-        wrong = tf.to_float(tf.logical_not(tf.nn.in_top_k(logits, single_label, 1)), name='wrong_vector')
+        single_label = tf.cast(tf.argmax(label, axis=1), tf.int32)
+        wrong = tf.cast(tf.logical_not(tf.nn.in_top_k(logits, single_label, 1)), tf.float32, name='wrong_vector')
         # monitor training error
         add_moving_summary(tf.reduce_mean(wrong, name='train_error'), ce_cost)
         add_param_summary(('.*/W', ['histogram']))
@@ -138,8 +138,6 @@ if __name__ == '__main__':
     dataset_train = get_data('train', args.mixup, args.alpha)
     dataset_test = get_data('test', args.mixup, args.alpha)
 
-    steps_per_epoch = dataset_train.size()
-
     config = TrainConfig(
         model=ResNet_Cifar(),
         data=QueueInput(dataset_train),
@@ -150,7 +148,7 @@ if __name__ == '__main__':
             ScheduledHyperParamSetter('learning_rate', LR_SCHEDULE)
         ],
         max_epoch=200,
-        steps_per_epoch=steps_per_epoch,
+        steps_per_epoch=len(dataset_train),
         session_init=SaverRestore(args.load) if args.load else None
     )
     launch_train_with_config(config, SimpleTrainer())

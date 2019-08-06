@@ -1,19 +1,21 @@
 # -*- coding: utf-8 -*-
 # File: tflayer.py
 
-import tensorflow as tf
-import six
 import functools
+import six
+import tensorflow as tf
 
-from ..utils.argtools import get_data_format
-from ..tfutils.common import get_tf_version_number
+from ..tfutils.common import get_tf_version_tuple
 from ..tfutils.varreplace import custom_getter_scope
+from ..utils.argtools import get_data_format
+
+__all__ = []
 
 
 def map_common_tfargs(kwargs):
     df = kwargs.pop('data_format', None)
     if df is not None:
-        df = get_data_format(df, tfmode=True)
+        df = get_data_format(df, keras_mode=True)
         kwargs['data_format'] = df
 
     old_nl = kwargs.pop('nl', None)
@@ -112,7 +114,7 @@ def rename_tflayer_get_variable():
 
 
 def monkeypatch_tf_layers():
-    if get_tf_version_number() < 1.4:
+    if get_tf_version_tuple() < (1, 4):
         if not hasattr(tf.layers, 'Dense'):
             from tensorflow.python.layers.core import Dense
             tf.layers.Dense = Dense

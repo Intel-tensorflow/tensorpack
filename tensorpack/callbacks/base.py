@@ -2,9 +2,10 @@
 # File: base.py
 
 
-import tensorflow as tf
 from abc import ABCMeta
 import six
+import tensorflow as tf
+
 from ..tfutils.common import get_op_or_tensor_by_name
 
 __all__ = ['Callback', 'ProxyCallback', 'CallbackFactory']
@@ -14,7 +15,7 @@ __all__ = ['Callback', 'ProxyCallback', 'CallbackFactory']
 class Callback(object):
     """ Base class for all callbacks. See
     `Write a Callback
-    <http://tensorpack.readthedocs.io/en/latest/tutorial/extend/callback.html>`_
+    <http://tensorpack.readthedocs.io/tutorial/extend/callback.html>`_
     for more detailed explanation of the callback methods.
 
     Attributes:
@@ -43,10 +44,16 @@ class Callback(object):
 
     _chief_only = True
 
+    name_scope = ""
+    """
+    A name scope for ops created inside this callback.
+    By default to the name of the class, but can be set per-instance.
+    """
+
     def setup_graph(self, trainer):
         self.trainer = trainer
         self.graph = tf.get_default_graph()
-        scope_name = type(self).__name__
+        scope_name = self.name_scope or type(self).__name__
         scope_name = scope_name.replace('_', '')
         with tf.name_scope(scope_name):
             self._setup_graph()

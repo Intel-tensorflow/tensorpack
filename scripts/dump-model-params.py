@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 # File: dump-model-params.py
 
-import numpy as np
-import six
 import argparse
+import numpy as np
 import os
+import six
 import tensorflow as tf
 
 from tensorpack.tfutils import varmanip
@@ -22,7 +22,11 @@ if __name__ == '__main__':
     # this script does not need GPU
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
 
-    tf.train.import_meta_graph(args.meta, clear_devices=True)
+    try:
+        tf.train.import_meta_graph(args.meta, clear_devices=True)
+    except KeyError:
+        print("If your graph contains non-standard ops, you need to import the relevant library first.")
+        raise
 
     # loading...
     if args.input.endswith('.npz'):
@@ -34,8 +38,10 @@ if __name__ == '__main__':
     # save variables that are GLOBAL, and either TRAINABLE or MODEL
     var_to_dump = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
     var_to_dump.extend(tf.get_collection(tf.GraphKeys.MODEL_VARIABLES))
-    assert len(set(var_to_dump)) == len(var_to_dump), "TRAINABLE and MODEL variables have duplication!"
-    globvarname = [k.name for k in tf.global_variables()]
+    if len(set(var_to_dump)) != len(var_to_dump):
+        print("TRAINABLE and MODEL variables have duplication!")
+    var_to_dump = list(set(var_to_dump))
+    globvarname = set([k.name for k in tf.global_variables()])
     var_to_dump = set([k.name for k in var_to_dump if k.name in globvarname])
 
     for name in var_to_dump:

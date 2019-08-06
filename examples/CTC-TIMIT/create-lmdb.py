@@ -2,17 +2,17 @@
 # -*- coding: utf-8 -*-
 # File: create-lmdb.py
 # Author: Yuxin Wu
-import os
-import scipy.io.wavfile as wavfile
-import string
-import numpy as np
 import argparse
-
+import numpy as np
+import os
+import string
 import bob.ap
+import scipy.io.wavfile as wavfile
+
 from tensorpack.dataflow import DataFlow, LMDBSerializer
+from tensorpack.utils import fs, logger, serialize
 from tensorpack.utils.argtools import memoized
 from tensorpack.utils.stats import OnlineMoments
-from tensorpack.utils import serialize, fs, logger
 from tensorpack.utils.utils import get_tqdm
 
 CHARSET = set(string.ascii_lowercase + ' ')
@@ -89,10 +89,10 @@ class RawTIMIT(DataFlow):
         assert label in ['phoneme', 'letter'], label
         self.label = label
 
-    def size(self):
+    def __len__(self):
         return len(self.filelists)
 
-    def get_data(self):
+    def __iter__(self):
         for f in self.filelists:
             feat = get_feature(f)
             if self.label == 'phoneme':
@@ -106,12 +106,10 @@ def compute_mean_std(db, fname):
     ds = LMDBSerializer.load(db, shuffle=False)
     ds.reset_state()
     o = OnlineMoments()
-    with get_tqdm(total=ds.size()) as bar:
-        for dp in ds.get_data():
-            feat = dp[0]  # len x dim
-            for f in feat:
-                o.feed(f)
-            bar.update()
+    for dp in get_tqdm(ds):
+        feat = dp[0]  # len x dim
+        for f in feat:
+            o.feed(f)
     logger.info("Writing to {} ...".format(fname))
     with open(fname, 'wb') as f:
         f.write(serialize.dumps([o.mean, o.std]))

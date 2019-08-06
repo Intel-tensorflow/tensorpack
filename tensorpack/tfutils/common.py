@@ -4,15 +4,16 @@
 
 import tensorflow as tf
 from six.moves import map
+
 from ..utils.argtools import graph_memoized
 
 __all__ = ['get_default_sess_config',
            'get_global_step_value',
            'get_global_step_var',
+           'get_tf_version_tuple'
            # 'get_op_tensor_name',
            # 'get_tensors_by_names',
            # 'get_op_or_tensor_by_name',
-           # 'get_tf_version_number',
            ]
 
 
@@ -22,7 +23,10 @@ def get_default_sess_config(mem_fraction=0.99):
     You can modify the returned config to fit your needs.
 
     Args:
-        mem_fraction(float): fraction of memory to use.
+        mem_fraction(float): see the `per_process_gpu_memory_fraction` option
+            in TensorFlow's GPUOptions protobuf:
+            https://github.com/tensorflow/tensorflow/blob/master/tensorflow/core/protobuf/config.proto
+
     Returns:
         tf.ConfigProto: the config to use.
     """
@@ -36,7 +40,7 @@ def get_default_sess_config(mem_fraction=0.99):
     # TF benchmark use cpu_count() - gpu_thread_count(), e.g. 80 - 8 * 2
     # Didn't see much difference.
 
-    conf.gpu_options.per_process_gpu_memory_fraction = 0.99
+    conf.gpu_options.per_process_gpu_memory_fraction = mem_fraction
 
     # This hurt performance of large data pipeline:
     # https://github.com/tensorflow/benchmarks/commit/1528c46499cdcff669b5d7c006b7b971884ad0e6
@@ -58,8 +62,7 @@ def get_default_sess_config(mem_fraction=0.99):
 def get_global_step_var():
     """
     Returns:
-        tf.Tensor: the global_step variable in the current graph. Create if
-            doesn't exist.
+        tf.Tensor: the global_step variable in the current graph. Create if doesn't exist.
     """
     scope = tf.VariableScope(reuse=False, name='')  # the root vs
     with tf.variable_scope(scope):
@@ -70,7 +73,11 @@ def get_global_step_var():
 def get_global_step_value():
     """
     Returns:
-        int: global_step value in current graph and session"""
+        int: global_step value in current graph and session
+
+    Has to be called under a default session.
+    """
+
     return tf.train.global_step(
         tf.get_default_session(),
         get_global_step_var())
@@ -132,8 +139,30 @@ def get_op_or_tensor_by_name(name):
         return list(map(f, name))
 
 
-def get_tf_version_number():
+def gpu_available_in_session():
+    sess = tf.get_default_session()
+    for dev in sess.list_devices():
+        if dev.device_type.lower() == 'gpu':
+            return True
+    return False
+
+
+def get_tf_version_tuple():
     """
-    Return a float (for comparison), indicating tensorflow version.
+    Return TensorFlow version as a 2-element tuple (for comparison).
     """
-    return float('.'.join(tf.VERSION.split('.')[:2]))
+    return tuple(map(int, tf.__version__.split('.')[:2]))
+
+
+def is_tf2():
+    try:
+        from tensorflow.python import tf2
+        return tf2.enabled()
+    except Exception:
+        return False
+
+
+if is_tf2():
+    tfv1 = tf.compat.v1
+else:
+    tfv1 = tf

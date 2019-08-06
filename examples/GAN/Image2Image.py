@@ -3,19 +3,20 @@
 # File: Image2Image.py
 # Author: Yuxin Wu
 
-import cv2
-import numpy as np
-import tensorflow as tf
-import glob
-import os
 import argparse
-
+import glob
+import numpy as np
+import os
+import cv2
+import tensorflow as tf
 
 from tensorpack import *
-from tensorpack.utils.viz import stack_patches
-from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
-from GAN import GANTrainer, GANModelDesc
+from tensorpack.tfutils.summary import add_moving_summary
+from tensorpack.utils.gpu import get_num_gpu
+from tensorpack.utils.viz import stack_patches
+
+from GAN import GANModelDesc, GANTrainer
 
 """
 To train Image-to-Image translation model with image pairs:
@@ -203,7 +204,6 @@ if __name__ == '__main__':
     parser.add_argument('--data', help='Image directory', required=True)
     parser.add_argument('--mode', choices=['AtoB', 'BtoA'], default='AtoB')
     parser.add_argument('-b', '--batch', type=int, default=1)
-    global args
     args = parser.parse_args()
     if args.gpu:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
@@ -217,8 +217,9 @@ if __name__ == '__main__':
         logger.auto_set_dir()
 
         data = QueueInput(get_data())
+        trainer = GANTrainer(data, Model(), get_num_gpu())
 
-        GANTrainer(data, Model()).train_with_defaults(
+        trainer.train_with_defaults(
             callbacks=[
                 PeriodicTrigger(ModelSaver(), every_k_epochs=3),
                 ScheduledHyperParamSetter('learning_rate', [(200, 1e-4)])

@@ -3,17 +3,17 @@
 # File: CycleGAN.py
 # Author: Yuxin Wu
 
-import os
 import argparse
 import glob
+import os
+import tensorflow as tf
 from six.moves import range
 
-
 from tensorpack import *
-from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope
-import tensorflow as tf
-from GAN import GANTrainer, GANModelDesc
+from tensorpack.tfutils.summary import add_moving_summary
+
+from GAN import GANModelDesc, GANTrainer
 
 """
 1. Download the dataset following the original project: https://github.com/junyanz/CycleGAN#train
@@ -193,7 +193,7 @@ class VisualizeTestSet(Callback):
 
     def _trigger(self):
         idx = 0
-        for iA, iB in self.val_ds.get_data():
+        for iA, iB in self.val_ds:
             vizA, vizB = self.pred(iA, iB)
             self.trainer.monitors.put_image('testA-{}'.format(idx), vizA)
             self.trainer.monitors.put_image('testB-{}'.format(idx), vizB)
@@ -212,7 +212,7 @@ if __name__ == '__main__':
 
     df = get_data(args.data)
     df = PrintData(df)
-    data = StagingInput(QueueInput(df))
+    data = QueueInput(df)
 
     GANTrainer(data, Model()).train_with_defaults(
         callbacks=[

@@ -1,7 +1,7 @@
 tensorpack.dataflow package
 ===========================
 
-Relevant tutorials: :doc:`../tutorial/dataflow`, :doc:`../tutorial/input-source`.
+Relevant tutorials: :doc:`../tutorial/dataflow`, :doc:`../tutorial/extend/input-source`.
 
 .. container:: custom-index
 
@@ -11,14 +11,6 @@ Relevant tutorials: :doc:`../tutorial/dataflow`, :doc:`../tutorial/input-source`
 
 
 .. automodule:: tensorpack.dataflow
-    :members:
-    :undoc-members:
-    :show-inheritance:
-
-tensorpack.dataflow.dftools module
-----------------------------------
-
-.. automodule:: tensorpack.dataflow.dftools
     :members:
     :undoc-members:
     :show-inheritance:

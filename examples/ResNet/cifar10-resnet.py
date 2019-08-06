@@ -5,14 +5,12 @@
 
 import argparse
 import os
-
+import tensorflow as tf
 
 from tensorpack import *
+from tensorpack.dataflow import dataset
 from tensorpack.tfutils.summary import add_moving_summary, add_param_summary
 from tensorpack.utils.gpu import get_num_gpu
-from tensorpack.dataflow import dataset
-
-import tensorflow as tf
 
 """
 CIFAR10 ResNet example. See:
@@ -98,7 +96,7 @@ class Model(ModelDesc):
         cost = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
         cost = tf.reduce_mean(cost, name='cross_entropy_loss')
 
-        wrong = tf.to_float(tf.logical_not(tf.nn.in_top_k(logits, label, 1)), name='wrong_vector')
+        wrong = tf.cast(tf.logical_not(tf.nn.in_top_k(logits, label, 1)), tf.float32, name='wrong_vector')
         # monitor training error
         add_moving_summary(tf.reduce_mean(wrong, name='train_error'))
 
@@ -120,7 +118,7 @@ class Model(ModelDesc):
 def get_data(train_or_test):
     isTrain = train_or_test == 'train'
     ds = dataset.Cifar10(train_or_test)
-    pp_mean = ds.get_per_pixel_mean()
+    pp_mean = ds.get_per_pixel_mean(('train',))
     if isTrain:
         augmentors = [
             imgaug.CenterPaste((40, 40)),

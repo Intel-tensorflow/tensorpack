@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
 # File: pool.py
 
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
 
-from .shape_utils import StaticDynamicShape
-from .common import layer_register
-from ..utils.argtools import shape2d, get_data_format
+from ..utils.argtools import get_data_format, shape2d
+from ..utils.develop import log_deprecated
 from ._test import TestModel
+from .common import layer_register
+from .shape_utils import StaticDynamicShape
 from .tflayer import convert_to_tflayer_args
 
-
-__all__ = ['MaxPooling', 'FixedUnPooling', 'AvgPooling', 'GlobalAvgPooling',
-           'BilinearUpSample']
+__all__ = ['MaxPooling', 'FixedUnPooling', 'AvgPooling', 'GlobalAvgPooling']
 
 
 @layer_register(log_shape=True)
@@ -102,7 +101,7 @@ def FixedUnPooling(x, shape, unpool_mat=None, data_format='channels_last'):
     Returns:
         tf.Tensor: a 4D image tensor.
     """
-    data_format = get_data_format(data_format, tfmode=False)
+    data_format = get_data_format(data_format, keras_mode=False)
     shape = shape2d(shape)
 
     output_shape = StaticDynamicShape(x)
@@ -141,10 +140,12 @@ def FixedUnPooling(x, shape, unpool_mat=None, data_format='channels_last'):
     return ret
 
 
-@layer_register(log_shape=True)
+# Removed (not importable) already; leave it here just for testing purposes.
 def BilinearUpSample(x, shape):
     """
     Deterministic bilinearly-upsample the input images.
+    It is implemented by deconvolution with "BilinearFiller" in Caffe.
+    It is aimed to mimic caffe behavior.
 
     Args:
         x (tf.Tensor): a NHWC tensor
@@ -153,9 +154,10 @@ def BilinearUpSample(x, shape):
     Returns:
         tf.Tensor: a NHWC tensor.
     """
+    log_deprecated("BilinearUpsample", "Please implement it in your own code instead!", "2019-03-01")
     inp_shape = x.shape.as_list()
     ch = inp_shape[3]
-    assert ch is not None
+    assert ch is not None and ch == 1
 
     shape = int(shape)
     filter_shape = 2 * shape
@@ -163,7 +165,7 @@ def BilinearUpSample(x, shape):
     def bilinear_conv_filler(s):
         """
         s: width, height of the conv filter
-        See https://github.com/BVLC/caffe/blob/master/include%2Fcaffe%2Ffiller.hpp#L244
+        https://github.com/BVLC/caffe/blob/99bd99795dcdf0b1d3086a8d67ab1782a8a08383/include/caffe/filler.hpp#L219-L268
         """
         f = np.ceil(float(s) / 2)
         c = float(2 * f - 1 - f % 2) / (2 * f)
@@ -219,7 +221,7 @@ class TestPool(TestModel):
         inp = self.make_variable(mat)
         inp = tf.reshape(inp, [1, h, w, 1])
 
-        output = BilinearUpSample('upsample', inp, scale)
+        output = BilinearUpSample(inp, scale)
         res = self.run_variable(output)[0, :, :, 0]
 
         from skimage.transform import rescale

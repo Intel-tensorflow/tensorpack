@@ -3,19 +3,19 @@
 # File: InfoGAN-mnist.py
 # Author: Yuxin Wu
 
-import cv2
-import numpy as np
-import tensorflow as tf
-import os
 import argparse
-
+import numpy as np
+import os
+import cv2
+import tensorflow as tf
 
 from tensorpack import *
-from tensorpack.utils import viz
-from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope, under_name_scope
-from tensorpack.tfutils import optimizer, summary, gradproc
 from tensorpack.dataflow import dataset
-from GAN import GANTrainer, GANModelDesc
+from tensorpack.tfutils import gradproc, optimizer, summary
+from tensorpack.tfutils.scope_utils import auto_reuse_variable_scope, under_name_scope
+from tensorpack.utils import viz
+
+from GAN import GANModelDesc, GANTrainer
 
 """
 To train:
@@ -212,6 +212,7 @@ class Model(GANModelDesc):
 def get_data():
     ds = ConcatData([dataset.Mnist('train'), dataset.Mnist('test')])
     ds = BatchData(ds, BATCH)
+    ds = MapData(ds, lambda dp: [dp[0]])  # only use the image
     return ds
 
 

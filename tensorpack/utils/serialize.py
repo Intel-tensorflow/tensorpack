@@ -2,16 +2,29 @@
 # File: serialize.py
 
 import os
+import sys
+
+import msgpack
+import msgpack_numpy
+
+from . import logger
 from .develop import create_dummy_func
 
+msgpack_numpy.patch()
+assert msgpack.version >= (0, 5, 2)
+
 __all__ = ['loads', 'dumps']
+
+
+MAX_MSGPACK_LEN = 1000000000
 
 
 def dumps_msgpack(obj):
     """
     Serialize an object.
+
     Returns:
-        Implementation-dependent bytes-like object
+        Implementation-dependent bytes-like object.
     """
     return msgpack.dumps(obj, use_bin_type=True)
 
@@ -21,7 +34,13 @@ def loads_msgpack(buf):
     Args:
         buf: the output of `dumps`.
     """
-    return msgpack.loads(buf, raw=False)
+    # Since 0.6, the default max size was set to 1MB.
+    # We change it to approximately 1G.
+    return msgpack.loads(buf, raw=False,
+                         max_bin_len=MAX_MSGPACK_LEN,
+                         max_array_len=MAX_MSGPACK_LEN,
+                         max_map_len=MAX_MSGPACK_LEN,
+                         max_str_len=MAX_MSGPACK_LEN)
 
 
 def dumps_pyarrow(obj):
@@ -29,7 +48,8 @@ def dumps_pyarrow(obj):
     Serialize an object.
 
     Returns:
-        Implementation-dependent bytes-like object
+        Implementation-dependent bytes-like object.
+        May not be compatible across different versions of pyarrow.
     """
     return pa.serialize(obj).to_buffer()
 
@@ -42,28 +62,22 @@ def loads_pyarrow(buf):
     return pa.deserialize(buf)
 
 
-try:
-    # fixed in pyarrow 0.9: https://github.com/apache/arrow/pull/1223#issuecomment-359895666
-    import pyarrow as pa
-except ImportError:
-    pa = None
-    dumps_pyarrow = create_dummy_func('dumps_pyarrow', ['pyarrow'])  # noqa
-    loads_pyarrow = create_dummy_func('loads_pyarrow', ['pyarrow'])  # noqa
+# import pyarrow has a lot of side effect:
+# https://github.com/apache/arrow/pull/2329
+# https://groups.google.com/a/tensorflow.org/forum/#!topic/developers/TMqRaT-H2bI
+# So we use msgpack as default.
+if os.environ.get('TENSORPACK_SERIALIZE', 'msgpack') == 'pyarrow':
+    try:
+        import pyarrow as pa
+    except ImportError:
+        loads_pyarrow = create_dummy_func('loads_pyarrow', ['pyarrow'])  # noqa
+        dumps_pyarrow = create_dummy_func('dumps_pyarrow', ['pyarrow'])  # noqa
 
-try:
-    import msgpack
-    import msgpack_numpy
-    msgpack_numpy.patch()
-except ImportError:
-    assert pa is not None, "pyarrow is a dependency of tensorpack!"
-    loads_msgpack = create_dummy_func(  # noqa
-        'loads_msgpack', ['msgpack', 'msgpack_numpy'])
-    dumps_msgpack = create_dummy_func(  # noqa
-        'dumps_msgpack', ['msgpack', 'msgpack_numpy'])
-
-if os.environ.get('TENSORPACK_SERIALIZE', None) == 'msgpack':
-    loads = loads_msgpack
-    dumps = dumps_msgpack
-else:
+    if 'horovod' in sys.modules:
+        logger.warn("Horovod and pyarrow may have symbol conflicts. "
+                    "Uninstall pyarrow and use msgpack instead.")
     loads = loads_pyarrow
     dumps = dumps_pyarrow
+else:
+    loads = loads_msgpack
+    dumps = dumps_msgpack

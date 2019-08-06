@@ -3,16 +3,20 @@
 
 
 import os
-from .utils import change_env
+
 from . import logger
-from .nvml import NVMLContext
 from .concurrency import subproc_call
+from .nvml import NVMLContext
+from .utils import change_env
 
 __all__ = ['change_gpu', 'get_nr_gpu', 'get_num_gpu']
 
 
 def change_gpu(val):
     """
+    Args:
+        val: an integer, the index of the GPU or -1 to disable GPU.
+
     Returns:
         a context where ``CUDA_VISIBLE_DEVICES=val``.
     """
@@ -36,11 +40,11 @@ def get_num_gpu():
 
         built_with_cuda = tf.test.is_built_with_cuda()
         if not built_with_cuda and ret > 0:
-            logger.warn(message + "But TensorFlow was not built with CUDA support!")
+            logger.warn(message + "But TensorFlow was not built with CUDA support and could not use GPUs!")
         return ret
 
     env = os.environ.get('CUDA_VISIBLE_DEVICES', None)
-    if env is not None:
+    if env:
         return warn_return(len(env.split(',')), "Found non-empty CUDA_VISIBLE_DEVICES. ")
     output, code = subproc_call("nvidia-smi -L", timeout=5)
     if code == 0:

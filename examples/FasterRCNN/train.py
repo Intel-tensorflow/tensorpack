@@ -22,7 +22,7 @@ assert six.PY3, "FasterRCNN requires Python 3!"
 from tensorpack import *
 from tensorpack.tfutils.summary import add_moving_summary
 from tensorpack.tfutils import optimizer
-from tensorpack.tfutils.common import get_tf_version_number
+from tensorpack.tfutils.common import get_tf_version_tuple
 import tensorpack.utils.viz as tpviz
 
 from coco import COCODetection
@@ -129,6 +129,10 @@ class DetectionModel(ModelDesc):
         final_probs = tf.identity(final_probs, 'final_probs')
         final_boxes = tf.gather_nd(decoded_boxes, pred_indices, name='final_boxes')
         final_labels = tf.add(pred_indices[:, 1], 1, name='final_labels')
+
+        if args.savepb:
+            SaveModelToPb()
+
         return final_boxes, final_labels
 
     def get_inference_tensor_names(self):
@@ -396,6 +400,34 @@ class ResNetFPNModel(DetectionModel):
                 tf.sigmoid(final_mask_logits, name='final_masks')
 
 
+def SaveModelToPb(): 
+    # Save the graph def (pb)
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    dir_path = dir_path + "/temp/built_graph/"
+    
+    # Save the Graph pb tf way  
+    inference_graph_temp = tf.get_default_graph().as_graph_def()
+
+    inference_graph = tf.graph_util.extract_sub_graph(
+          inference_graph_temp, ['final_probs','final_boxes','final_labels'])
+    #with open("./mnist.pbtxt", "w") as f:
+    #    f.write(str(inference_graph))
+
+    tf.train.write_graph(inference_graph, dir_path, "Fasterrcnnfpn.pb", False)
+    tf.train.write_graph(inference_graph, dir_path, "Fasterrcnnfpn.pbtxt", True)
+    
+    # Save the graph pb 
+    #with open("./temp/built_graph/inference_graph2.pbtxt", "w") as f:
+    #    f.write(str(inference_graph))
+    
+    # Save the Frozen graph def tensor pack way     
+    #dir_path = os.path.dirname(os.path.realpath(__file__))
+    #dir_file = dir_path + "/temp/built_graph/Fasterrcnnfpn_graph_def_frozen.pb"
+    #ModelExporter(pred_config).export_compact(dir_file)
+    
+    # Return without doing anything more.
+    print("Saved model in {}".format(dir_path))
+
 def visualize(model, model_path, nr_visualize=100, output_dir='output'):
     """
     Visualize some intermediate results (proposals, raw predictions) inside the pipeline.
@@ -455,7 +487,8 @@ def visualize(model, model_path, nr_visualize=100, output_dir='output'):
 def offline_evaluate(pred_func, output_file):
     df = get_eval_dataflow()
     all_results = eval_coco(
-        df, lambda img: detect_one_image(img, pred_func))
+        df, 
+        lambda img: detect_one_image(img, pred_func, args, False), args)
     with open(output_file, 'w') as f:
         json.dump(all_results, f)
     print_evaluation_scores(output_file)
@@ -463,11 +496,20 @@ def offline_evaluate(pred_func, output_file):
 
 def predict(pred_func, input_file):
     img = cv2.imread(input_file, cv2.IMREAD_COLOR)
-    results = detect_one_image(img, pred_func)
+    
+    results = detect_one_image(img, pred_func, args, True)
     final = draw_final_outputs(img, results)
     viz = np.concatenate((img, final), axis=1)
     tpviz.interactive_imshow(viz)
 
+def predict_images(pred_func, input_folder):
+
+    img = cv2.imread(input_file, cv2.IMREAD_COLOR)
+    
+    results = detect_one_image(img, pred_func, args, True)
+    final = draw_final_outputs(img, results)
+    viz = np.concatenate((img, final), axis=1)
+    tpviz.interactive_imshow(viz)
 
 class EvalCallback(Callback):
     def __init__(self, in_names, out_names):
@@ -504,6 +546,7 @@ class EvalCallback(Callback):
 
 
 if __name__ == '__main__':
+    model_name = "Fasterrcnnfpn_graph_def_freezed.pb"
     parser = argparse.ArgumentParser()
     parser.add_argument('--load', help='load a model for evaluation or training. Can overwrite BACKBONE.WEIGHTS')
     parser.add_argument('--logdir', help='log directory', default='train_log/maskrcnn')
@@ -512,15 +555,30 @@ if __name__ == '__main__':
                                            "This argument is the path to the output json evaluation file")
     parser.add_argument('--predict', help="Run prediction on a given image. "
                                           "This argument is the path to the input image file")
+    parser.add_argument('--predict_images', help="Run prediction on a given image. "
+                                          "This argument is the path to the input image file")
     parser.add_argument('--config', help="A list of KEY=VALUE to overwrite those defined in config.py",
                         nargs='+')
+    parser.add_argument('--vscode', action='store_true', help='use vscode for debugging')
+    parser.add_argument('--savepb', action='store_true', help='save model to pb file. --evaluate should be specified.')
+    parser.add_argument('--loadfrozenpb', action='store_true', help='Evaluate from frozen pb file. --evaluate should be specified.', default=False)
+    parser.add_argument('--model_name', help='name of the directory', default=model_name)
 
-    if get_tf_version_number() < 1.6:
-        # https://github.com/tensorflow/tensorflow/issues/14657
-        logger.warn("TF<1.6 has a bug which may lead to crash in FasterRCNN training if you're unlucky.")
+    #if get_tf_version_number() < 1.6:
+    #    # https://github.com/tensorflow/tensorflow/issues/14657
+    #    logger.warn("TF<1.6 has a bug which may lead to crash in FasterRCNN training if you're unlucky.")
 
     args = parser.parse_args()
     if args.config:
+
+        if args.vscode:   
+            #for vscode only
+            for vsargs1 in args.config:
+                vsargs2 = vsargs1.replace('\"', '')
+                vsargs3 = []
+                vsargs3 = vsargs2.split(',')
+                args.config = vsargs3
+
         cfg.update_args(args.config)
 
     MODEL = ResNetFPNModel() if cfg.MODE_FPN else ResNetC4Model()
@@ -544,8 +602,11 @@ if __name__ == '__main__':
                 assert args.evaluate.endswith('.json'), args.evaluate
                 offline_evaluate(pred, args.evaluate)
             elif args.predict:
-                COCODetection(cfg.DATA.BASEDIR, 'val2014')   # Only to load the class names into caches
+                COCODetection(cfg.DATA.BASEDIR, cfg.DATA.VAL)   # Only to load the class names into caches
                 predict(pred, args.predict)
+            elif args.predict_images:
+                COCODetection(cfg.DATA.BASEDIR, cfg.DATA.VAL)   # Only to load the class names into caches
+                predict_images(pred, args.predict_images)
     else:
         is_horovod = cfg.TRAINER == 'horovod'
         if is_horovod:

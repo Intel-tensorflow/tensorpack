@@ -1,9 +1,10 @@
-import cv2
-import os
 import argparse
 import numpy as np
+import os
 import zipfile
-from tensorpack import RNGDataFlow, MapDataComponent, LMDBSerializer
+import cv2
+
+from tensorpack import LMDBSerializer, MapDataComponent, RNGDataFlow
 
 
 class ImageDataFromZIPFile(RNGDataFlow):
@@ -34,7 +35,7 @@ class ImageDataFromZIPFile(RNGDataFlow):
     def size(self):
         return len(self.archivefiles)
 
-    def get_data(self):
+    def __iter__(self):
         if self.shuffle:
             self.rng.shuffle(self.archivefiles)
         for archive in self.archivefiles:
@@ -111,6 +112,6 @@ if __name__ == '__main__':
         LMDBSerializer.save(ds, args.lmdb)
     if args.debug:
         ds.reset_state()
-        for i in ds.get_data():
+        for i in ds:
             cv2.imshow('example', i[0])
             cv2.waitKey(0)

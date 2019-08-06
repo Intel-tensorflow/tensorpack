@@ -2,10 +2,10 @@
 # File: imgproc.py
 
 
-from .base import ImageAugmentor
-from ...utils import logger
 import numpy as np
 import cv2
+
+from .base import ImageAugmentor
 
 __all__ = ['Hue', 'Brightness', 'BrightnessScale', 'Contrast', 'MeanVarianceNormalize',
            'GaussianBlur', 'Gamma', 'Clip', 'Saturation', 'Lighting', 'MinMaxNormalize']
@@ -15,16 +15,13 @@ class Hue(ImageAugmentor):
     """ Randomly change color hue.
     """
 
-    def __init__(self, range=(0, 180), rgb=None):
+    def __init__(self, range=(0, 180), rgb=True):
         """
         Args:
             range(list or tuple): range from which the applied hue offset is selected (maximum [-90,90] or [0,180])
             rgb (bool): whether input is RGB or BGR.
         """
         super(Hue, self).__init__()
-        if rgb is None:
-            logger.warn("Hue() now assumes rgb=False, but will by default use rgb=True in the future!")
-            rgb = False
         rgb = bool(rgb)
         self._init(locals())
 
@@ -54,7 +51,7 @@ class Brightness(ImageAugmentor):
         """
         Args:
             delta (float): Randomly add a value within [-delta,delta]
-            clip (bool): clip results to [0,255].
+            clip (bool): clip results to [0,255] if data type is uint8.
         """
         super(Brightness, self).__init__()
         assert delta > 0
@@ -81,7 +78,7 @@ class BrightnessScale(ImageAugmentor):
         """
         Args:
             range (tuple): Randomly scale the image by a factor in (range[0], range[1])
-            clip (bool): clip results to [0,255].
+            clip (bool): clip results to [0,255] if data type is uint8.
         """
         super(BrightnessScale, self).__init__()
         self._init(locals())
@@ -104,11 +101,12 @@ class Contrast(ImageAugmentor):
     Apply ``x = (x - mean) * contrast_factor + mean`` to each channel.
     """
 
-    def __init__(self, factor_range, clip=True):
+    def __init__(self, factor_range, rgb=None, clip=True):
         """
         Args:
             factor_range (list or tuple): an interval to randomly sample the `contrast_factor`.
-            clip (bool): clip to [0, 255] if True.
+            rgb (bool or None): if None, use the mean per-channel.
+            clip (bool): clip to [0, 255] if data type is uint8.
         """
         super(Contrast, self).__init__()
         self._init(locals())
@@ -118,9 +116,18 @@ class Contrast(ImageAugmentor):
 
     def _augment(self, img, r):
         old_dtype = img.dtype
-        img = img.astype('float32')
-        mean = np.mean(img, axis=(0, 1), keepdims=True)
-        img = (img - mean) * r + mean
+
+        if img.ndim == 3:
+            if self.rgb is not None:
+                m = cv2.COLOR_RGB2GRAY if self.rgb else cv2.COLOR_BGR2GRAY
+                grey = cv2.cvtColor(img.astype('float32'), m)
+                mean = np.mean(grey)
+            else:
+                mean = np.mean(img, axis=(0, 1), keepdims=True)
+        else:
+            mean = np.mean(img)
+
+        img = img * r + mean * (1 - r)
         if self.clip or old_dtype == np.uint8:
             img = np.clip(img, 0, 255)
         return img.astype(old_dtype)

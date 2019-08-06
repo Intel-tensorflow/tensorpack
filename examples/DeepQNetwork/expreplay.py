@@ -2,18 +2,18 @@
 # File: expreplay.py
 # Author: Yuxin Wu
 
-import numpy as np
 import copy
-from collections import deque, namedtuple
+import numpy as np
 import threading
+from collections import deque, namedtuple
 from six.moves import queue, range
 
+from tensorpack.callbacks.base import Callback
 from tensorpack.dataflow import DataFlow
 from tensorpack.utils import logger
-from tensorpack.utils.utils import get_tqdm, get_rng
-from tensorpack.utils.stats import StatCounter
 from tensorpack.utils.concurrency import LoopThread, ShareSessionThread
-from tensorpack.callbacks.base import Callback
+from tensorpack.utils.stats import StatCounter
+from tensorpack.utils.utils import get_rng, get_tqdm
 
 __all__ = ['ExpReplay']
 
@@ -22,12 +22,24 @@ Experience = namedtuple('Experience',
 
 
 class ReplayMemory(object):
-    def __init__(self, max_size, state_shape, history_len):
+    def __init__(self, max_size, state_shape, history_len, dtype='uint8'):
+        """
+        Args:
+            state_shape (tuple[int]): shape (without history) of state
+            dtype: numpy dtype for the state
+        """
         self.max_size = int(max_size)
         self.state_shape = state_shape
+        assert len(state_shape) in [1, 2, 3], state_shape
+        self._output_shape = self.state_shape + (history_len + 1, )
         self.history_len = int(history_len)
+        self.dtype = dtype
 
-        self.state = np.zeros((self.max_size,) + state_shape, dtype='uint8')
+        all_state_shape = (self.max_size,) + state_shape
+        logger.info("Creating experience replay buffer of {:.1f} GB ... "
+                    "use a smaller buffer if you don't have enough CPU memory.".format(
+                        np.prod(all_state_shape) / 1024.0**3))
+        self.state = np.zeros(all_state_shape, dtype=self.dtype)
         self.action = np.zeros((self.max_size,), dtype='int32')
         self.reward = np.zeros((self.max_size,), dtype='float32')
         self.isOver = np.zeros((self.max_size,), dtype='bool')
@@ -54,15 +66,16 @@ class ReplayMemory(object):
             self._hist.append(exp)
 
     def recent_state(self):
-        """ return a list of (hist_len-1,) + STATE_SIZE """
+        """ return a list of ``hist_len-1`` elements, each of shape ``self.state_shape`` """
         lst = list(self._hist)
-        states = [np.zeros(self.state_shape, dtype='uint8')] * (self._hist.maxlen - len(lst))
+        states = [np.zeros(self.state_shape, dtype=self.dtype)] * (self._hist.maxlen - len(lst))
         states.extend([k.state for k in lst])
         return states
 
     def sample(self, idx):
         """ return a tuple of (s,r,a,o),
-            where s is of shape STATE_SIZE + (hist_len+1,)"""
+            where s is of shape self._output_shape, which is
+            [H, W, (hist_len+1) * channel] if input is (H, W, channel)"""
         idx = (self._curr_pos + idx) % self._curr_size
         k = self.history_len + 1
         if idx + k <= self._curr_size:
@@ -81,12 +94,14 @@ class ReplayMemory(object):
 
     # the next_state is a different episode if current_state.isOver==True
     def _pad_sample(self, state, reward, action, isOver):
+        # state: Hist+1,H,W,C
         for k in range(self.history_len - 2, -1, -1):
             if isOver[k]:
                 state = copy.deepcopy(state)
                 state[:k + 1].fill(0)
                 break
-        state = state.transpose(1, 2, 0)
+        # move the first dim (history) to the last
+        state = np.moveaxis(state, 0, -1)
         return (state, reward[-2], action[-2], isOver[-2])
 
     def _slice(self, arr, start, end):
@@ -124,17 +139,20 @@ class ExpReplay(DataFlow, Callback):
                  batch_size,
                  memory_size, init_memory_size,
                  init_exploration,
-                 update_frequency, history_len):
+                 update_frequency, history_len,
+                 state_dtype='uint8'):
         """
         Args:
             predictor_io_names (tuple of list of str): input/output names to
                 predict Q value from state.
-            player (RLEnvironment): the player.
+            player (gym.Env): the player.
+            state_shape (tuple):
             history_len (int): length of history frames to concat. Zero-filled
                 initial frames.
             update_frequency (int): number of new transitions to add to memory
                 after sampling a batch of transitions for training.
         """
+        assert len(state_shape) in [1, 2, 3], state_shape
         init_memory_size = int(init_memory_size)
 
         for k, v in locals().items():
@@ -195,15 +213,21 @@ class ExpReplay(DataFlow, Callback):
             # build a history state
             history = self.mem.recent_state()
             history.append(old_s)
-            history = np.stack(history, axis=2)
+            history = np.stack(history, axis=-1)  # state_shape + (Hist,)
+            history = np.expand_dims(history, axis=0)
 
             # assume batched network
-            q_values = self.predictor(history[None, :, :, :])[0][0]  # this is the bottleneck
+            q_values = self.predictor(history)[0][0]  # this is the bottleneck
             act = np.argmax(q_values)
         self._current_ob, reward, isOver, info = self.player.step(act)
         self._current_game_score.feed(reward)
         if isOver:
-            if info['ale.lives'] == 0:  # only record score when a whole game is over (not when an episode is over)
+            if 'ale.lives' in info:  # if running Atari, do something special for logging:
+                if info['ale.lives'] == 0:
+                    # only record score when a whole game is over (not when an episode is over)
+                    self._player_scores.feed(self._current_game_score.sum)
+                    self._current_game_score.reset()
+            else:
                 self._player_scores.feed(self._current_game_score.sum)
                 self._current_game_score.reset()
             self.player.reset()
@@ -213,6 +237,7 @@ class ExpReplay(DataFlow, Callback):
         import cv2
 
         def view_state(comb_state):
+            # this function assumes comb_state is 3D
             state = comb_state[:, :, :-1]
             next_state = comb_state[:, :, 1:]
             r = np.concatenate([state[:, :, k] for k in range(self.history_len)], axis=1)
@@ -225,14 +250,14 @@ class ExpReplay(DataFlow, Callback):
             view_state(sample[0])
 
     def _process_batch(self, batch_exp):
-        state = np.asarray([e[0] for e in batch_exp], dtype='uint8')
+        state = np.asarray([e[0] for e in batch_exp], dtype=self.state_dtype)
         reward = np.asarray([e[1] for e in batch_exp], dtype='float32')
         action = np.asarray([e[2] for e in batch_exp], dtype='int8')
         isOver = np.asarray([e[3] for e in batch_exp], dtype='bool')
         return [state, action, reward, isOver]
 
     # DataFlow method:
-    def get_data(self):
+    def __iter__(self):
         # wait for memory to be initialized
         self._init_memory_flag.wait()
 
@@ -280,7 +305,6 @@ if __name__ == '__main__':
                   history_len=4)
     E._init_memory()
 
-    for k in E.get_data():
+    for _ in E.get_data():
         import IPython as IP
         IP.embed(config=IP.terminal.ipapp.load_default_config())
-        pass

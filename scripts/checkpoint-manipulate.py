@@ -3,11 +3,11 @@
 # File: checkpoint-manipulate.py
 
 
-import numpy as np
-from tensorpack.tfutils.varmanip import dump_chkpt_vars
-from tensorpack.utils import logger
 import argparse
+import numpy as np
 
+from tensorpack.tfutils.varmanip import load_chkpt_vars
+from tensorpack.utils import logger
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -21,13 +21,13 @@ if __name__ == '__main__':
     elif args.model.endswith('.npz'):
         params = dict(np.load(args.model))
     else:
-        params = dump_chkpt_vars(args.model)
+        params = load_chkpt_vars(args.model)
     logger.info("Variables in the model:")
     logger.info(str(params.keys()))
 
     if args.dump:
         assert args.dump.endswith('.npz'), args.dump
-        np.save(args.dump, **params)
+        np.savez(args.dump, **params)
 
     if args.shell:
         # params is a dict. play with it

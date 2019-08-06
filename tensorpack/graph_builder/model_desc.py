@@ -5,12 +5,16 @@
 from collections import namedtuple
 import tensorflow as tf
 
-from ..utils import logger
-from ..utils.argtools import memoized
-from ..utils.develop import log_deprecated
-from ..tfutils.tower import get_current_tower_context
-from ..input_source import InputSource
 from ..models.regularize import regularize_cost_from_collection
+from ..tfutils.tower import get_current_tower_context
+from ..tfutils.common import get_tf_version_tuple
+from ..utils import logger
+from ..utils.argtools import memoized_method
+from ..utils.develop import log_deprecated
+
+if get_tf_version_tuple() >= (1, 7):
+    from tensorflow.python.framework.tensor_spec import TensorSpec
+
 
 __all__ = ['InputDesc', 'ModelDesc', 'ModelDescBase']
 
@@ -38,8 +42,7 @@ class InputDesc(
         self._cached_placeholder = {}
         return self
 
-    # TODO this method seems unused outside this class
-    def build_placeholder(self):
+    def _build_placeholder(self):
         """
         Build a tf.placeholder from the metadata.
 
@@ -64,7 +67,7 @@ class InputDesc(
         if g in self._cached_placeholder:
             return self._cached_placeholder[g]
         else:
-            return self.build_placeholder()
+            return self._build_placeholder()
 
     def _register_cached_placeholder(self, placeholder):
         graph = placeholder.graph
@@ -73,7 +76,7 @@ class InputDesc(
         self._cached_placeholder[graph] = placeholder
 
     @staticmethod
-    def from_placeholder(placeholder):
+    def _from_placeholder(placeholder):
         name = placeholder.op.name
         if name.endswith('_1') or name.endswith('_2'):
             logger.error("Creating InputDesc from a placeholder named {}.".format(name))
@@ -85,41 +88,67 @@ class InputDesc(
         ret._register_cached_placeholder(placeholder)
         return ret
 
+    @staticmethod
+    def _from_tensor_spec(spec):
+        assert spec.name is not None, "TensorSpec should have a name!"
+        return InputDesc(spec.dtype, tuple(spec.shape.as_list()), spec.name)
+
 
 class ModelDescBase(object):
     """
     Base class for a model description.
     """
 
-    @memoized
+    @memoized_method
     def get_inputs_desc(self):
         """
         Returns:
-            a list of :class:`InputDesc`.
+            A list of :class:`InputDesc`, which describes the inputs of this model.
+            The result is cached for each instance of :class:`ModelDescBase`.
         """
         try:
-            return self._get_inputs()
+            ret = self._get_inputs()
+            log_deprecated(
+                "ModelDescBase._get_inputs() interface",
+                "Use inputs() instead!",
+                "2019-03-30")
+            return ret
         except NotImplementedError:
             with tf.Graph().as_default() as G:   # create these placeholder in a temporary graph
                 inputs = self.inputs()
-                for p in inputs:
-                    assert p.graph == G, "Placeholders returned by inputs() should be created inside inputs()!"
-                return [InputDesc.from_placeholder(p) for p in inputs]
+                if isinstance(inputs[0], tf.Tensor):
+                    for p in inputs:
+                        assert p.graph == G, "Placeholders returned by inputs() should be created inside inputs()!"
+                    return [InputDesc._from_placeholder(p) for p in inputs]
+                else:
+                    for p in inputs:
+                        assert isinstance(p, TensorSpec), type(p)
+                    return [InputDesc._from_tensor_spec(p) for p in inputs]
+
+    @property
+    def input_names(self):
+        """
+        Returns:
+            [str]: the names of all the inputs.
+        """
+        return [k.name for k in self.get_inputs_desc()]
 
     def _get_inputs(self):
         raise NotImplementedError()
 
     def inputs(self):
         """
-        __Create__ and returns a list of placeholders.
+        Returns a list of :class:`tf.TensorSpec` or placeholders.
         A subclass is expected to implement this method.
 
-        The placeholders __have to__ be created inside this method.
-        Don't return placeholders created in other methods.
-        Also, you should not call this method by yourself.
+        If returning placeholders,
+        the placeholders __have to__ be created inside this method.
+        Don't return placeholders created in other places.
+
+        Also, you should never call this method by yourself.
 
         Returns:
-            a list of `tf.placeholder`, to be converted to :class:`InputDesc`.
+            list[tf.placeholder] or list[tf.TensorSpec], to be converted to :class:`InputDesc`.
         """
         raise NotImplementedError()
 
@@ -128,7 +157,7 @@ class ModelDescBase(object):
         Build the whole symbolic graph.
         This is supposed to be part of the "tower function" when used with :class:`TowerTrainer`.
 
-        A subclass is expected to overwrite this method.
+        A subclass is expected to implement this method.
 
         Args:
             args ([tf.Tensor]): tensors that matches the list of inputs defined by ``inputs()``.
@@ -138,24 +167,14 @@ class ModelDescBase(object):
             may require it to return necessary information to build the trainer.
             For example, `SingleCostTrainer` expect this method to return the cost tensor.
         """
-        if len(args) == 1:
-            arg = args[0]
-            if isinstance(arg, InputSource):
-                inputs = arg.get_input_tensors()  # remove in the future?
-                log_deprecated("build_graph(InputSource)",
-                               "Call with tensors in positional args instead.", "2018-03-31")
-            elif isinstance(arg, (list, tuple)):
-                inputs = arg
-                log_deprecated("build_graph([Tensor])", "Call with positional args instead.", "2018-03-31")
-            else:
-                inputs = [arg]
-        else:
-            inputs = args
-
-        assert len(inputs) == len(self.get_inputs_desc()), \
+        assert len(args) == len(self.get_inputs_desc()), \
             "Number of inputs passed to the graph != number of inputs defined " \
-            "in ModelDesc! ({} != {})".format(len(inputs), len(self.get_inputs_desc()))
-        return self._build_graph(inputs)
+            "in ModelDesc! ({} != {})".format(len(args), len(self.get_inputs_desc()))
+        log_deprecated(
+            "ModelDescBase._build_graph() interface",
+            "Use build_graph() instead!",
+            "2019-03-30")
+        return self._build_graph(args)
 
     def _build_graph(self, inputs):
         """
@@ -187,6 +206,10 @@ class ModelDesc(ModelDescBase):
         and applies the collection
         ``tf.GraphKeys.REGULARIZATION_LOSSES`` to the cost automatically.
         """
+        log_deprecated(
+            "get_cost() and self.cost",
+            "Return the cost tensor directly in build_graph() instead!",
+            "2019-03-30")
         cost = self._get_cost()
         reg_cost = regularize_cost_from_collection()
         if reg_cost.op.type != 'Const':
@@ -199,7 +222,7 @@ class ModelDesc(ModelDescBase):
     def _get_cost(self, *args):
         return self.cost
 
-    @memoized
+    @memoized_method
     def get_optimizer(self):
         """
         Return the memoized optimizer returned by `optimizer()`.
@@ -211,7 +234,12 @@ class ModelDesc(ModelDescBase):
             a :class:`tf.train.Optimizer` instance.
         """
         try:
-            return self._get_optimizer()
+            ret = self._get_optimizer()
+            log_deprecated(
+                "ModelDescBase._get_optimizer() interface",
+                "Use optimizer() instead!",
+                "2019-03-30")
+            return ret
         except NotImplementedError:
             pass
         return self.optimizer()
@@ -228,12 +256,13 @@ class ModelDesc(ModelDescBase):
 
     def _build_graph_get_cost(self, *inputs):
         """
+        Equivalent to `build_graph`.
         Used internally by trainers to get the final cost for optimization in a backward-compatible way.
         """
         ret = self.build_graph(*inputs)
         if not get_current_tower_context().is_training:
             return None     # this is the tower function, could be called for inference
-        if isinstance(ret, tf.Tensor):  # the preferred way
+        if ret is not None:
             return ret
         else:   # the old way, for compatibility
             return self.get_cost()

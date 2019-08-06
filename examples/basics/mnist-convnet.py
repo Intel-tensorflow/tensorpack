@@ -3,16 +3,15 @@
 # File: mnist-convnet.py
 
 import tensorflow as tf
+
+from tensorpack import *
+from tensorpack.dataflow import dataset
+from tensorpack.tfutils import summary
+
 """
 MNIST ConvNet example.
 about 0.6% validation error after 30 epochs.
 """
-
-
-# Just import everything into current namespace
-from tensorpack import *
-from tensorpack.tfutils import summary
-from tensorpack.dataflow import dataset
 
 IMAGE_SIZE = 28
 
@@ -104,8 +103,8 @@ if __name__ == '__main__':
     dataset_train, dataset_test = get_data()
 
     # How many iterations you want in each epoch.
-    # This (data.size()) is the default value.
-    steps_per_epoch = dataset_train.size()
+    # This len(data) is the default value.
+    steps_per_epoch = len(dataset_train)
 
     # get the config which contains everything necessary in a training
     config = TrainConfig(
@@ -115,10 +114,12 @@ if __name__ == '__main__':
         data=FeedInput(dataset_train),
         callbacks=[
             ModelSaver(),   # save the model after every epoch
-            MaxSaver('validation_accuracy'),  # save the model with highest accuracy (prefix 'validation_')
             InferenceRunner(    # run inference(for validation) after every epoch
                 dataset_test,   # the DataFlow instance used for validation
-                ScalarStats(['cross_entropy_loss', 'accuracy'])),
+                ScalarStats(    # produce `val_accuracy` and `val_cross_entropy_loss`
+                    ['cross_entropy_loss', 'accuracy'], prefix='val')),
+            # MaxSaver has to come after InferenceRunner
+            MaxSaver('val_accuracy'),  # save the model with highest accuracy
         ],
         steps_per_epoch=steps_per_epoch,
         max_epoch=100,

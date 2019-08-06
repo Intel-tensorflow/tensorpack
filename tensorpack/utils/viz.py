@@ -5,10 +5,10 @@
 import numpy as np
 import os
 import sys
-import io
-from .fs import mkdir_p
+
+from ..utils.develop import create_dummy_func  # noqa
 from .argtools import shape2d
-from .rect import BoxBase, IntBox
+from .fs import mkdir_p
 from .palette import PALETTE_RGB
 
 try:
@@ -17,22 +17,10 @@ except ImportError:
     pass
 
 
-__all__ = ['pyplot2img', 'interactive_imshow',
+__all__ = ['interactive_imshow',
            'stack_patches', 'gen_stack_patches',
            'dump_dataflow_images', 'intensity_to_rgb',
            'draw_boxes']
-
-
-def pyplot2img(plt):
-    """ Convert a pyplot instance to image """
-    buf = io.BytesIO()
-    plt.axis('off')
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
-    buf.seek(0)
-    rawbuf = np.frombuffer(buf.getvalue(), dtype='uint8')
-    im = cv2.imdecode(rawbuf, cv2.IMREAD_COLOR)
-    buf.close()
-    return im
 
 
 def interactive_imshow(img, lclick_cb=None, rclick_cb=None, **kwargs):
@@ -308,7 +296,7 @@ def dump_dataflow_images(df, index=0, batched=True,
     df.reset_state()
     cnt = 0
     while True:
-        for dp in df.get_data():
+        for dp in df:
             if not batched:
                 imgbatch = [dp[index]]
             else:
@@ -367,8 +355,7 @@ def draw_boxes(im, boxes, labels=None, color=None):
     """
     Args:
         im (np.ndarray): a BGR image in range [0,255]. It will not be modified.
-        boxes (np.ndarray or list[BoxBase]): If an ndarray,
-            must be of shape Nx4 where the second dimension is [x1, y1, x2, y2].
+        boxes (np.ndarray): a numpy array of shape Nx4 where each row is [x1, y1, x2, y2].
         labels: (list[str] or None)
         color: a 3-tuple (in range [0, 255]). By default will choose automatically.
 
@@ -377,14 +364,7 @@ def draw_boxes(im, boxes, labels=None, color=None):
     """
     FONT = cv2.FONT_HERSHEY_SIMPLEX
     FONT_SCALE = 0.4
-    if isinstance(boxes, list):
-        arr = np.zeros((len(boxes), 4), dtype='int32')
-        for idx, b in enumerate(boxes):
-            assert isinstance(b, BoxBase), b
-            arr[idx, :] = [int(b.x1), int(b.y1), int(b.x2), int(b.y2)]
-        boxes = arr
-    else:
-        boxes = boxes.astype('int32')
+    boxes = np.asarray(boxes, dtype='int32')
     if labels is not None:
         assert len(labels) == len(boxes), "{} != {}".format(len(labels), len(boxes))
     areas = (boxes[:, 2] - boxes[:, 0] + 1) * (boxes[:, 3] - boxes[:, 1] + 1)
@@ -415,28 +395,27 @@ def draw_boxes(im, boxes, labels=None, color=None):
             if top_left[1] < 0:     # out of image
                 top_left[1] = box[3] - 1.3 * lineh
                 bottom_left[1] = box[3] - 0.3 * lineh
-            textbox = IntBox(int(top_left[0]), int(top_left[1]),
-                             int(top_left[0] + linew), int(top_left[1] + lineh))
-            textbox.clip_by_shape(im.shape[:2])
+            x1, y1 = int(top_left[0]), int(top_left[1])
+            x2, y2 = int(top_left[0] + linew), int(top_left[1] + lineh)
+            x1, x2 = [np.clip(x, 0, im.shape[1] - 1) for x in [x1, x2]]
+            y1, y2 = [np.clip(y, 0, im.shape[0] - 1) for y in [y1, y2]]
             if color is None:
                 # find the best color
-                mean_color = textbox.roi(im).mean(axis=(0, 1))
+                mean_color = im[y1:y2 + 1, x1:x2 + 1].mean(axis=(0, 1))
                 best_color_ind = (np.square(COLOR_CANDIDATES - mean_color) *
                                   COLOR_DIFF_WEIGHT).sum(axis=1).argmax()
                 best_color = COLOR_CANDIDATES[best_color_ind].tolist()
 
-            cv2.putText(im, label, (textbox.x1, textbox.y2),
+            cv2.putText(im, label, (x1, y2),
                         FONT, FONT_SCALE, color=best_color, lineType=cv2.LINE_AA)
         cv2.rectangle(im, (box[0], box[1]), (box[2], box[3]),
                       color=best_color, thickness=1)
     return im
 
 
-from ..utils.develop import create_dummy_func   # noqa
 try:
     import matplotlib.pyplot as plt
 except (ImportError, RuntimeError):
-    pyplot2img = create_dummy_func('pyplot2img', 'matplotlib')    # noqa
     intensity_to_rgb = create_dummy_func('intensity_to_rgb', 'matplotlib')    # noqa
 
 if __name__ == '__main__':

@@ -4,14 +4,13 @@
 """ Some common step callbacks. """
 
 import tensorflow as tf
-from six.moves import zip
 import tqdm
+from six.moves import zip
 
+from ..tfutils.common import get_global_step_var, get_op_tensor_name
 from ..utils import logger
-from ..utils.utils import get_tqdm_kwargs
 from ..utils.naming import GLOBAL_STEP_INCR_OP_NAME
-from ..tfutils.common import (
-    get_op_tensor_name, get_global_step_var)
+from ..utils.utils import get_tqdm_kwargs
 from .base import Callback
 
 __all__ = ['TensorPrinter', 'ProgressBar', 'SessionRunTimeout']
@@ -102,8 +101,8 @@ class ProgressBar(Callback):
 
 class MaintainStepCounter(Callback):
     """
-    It maintains the global step in the graph, making sure it's increased by one.
-    This callback is used by the trainer, you don't need to worry about it.
+    It maintains the global step in the graph, making sure it's increased by one at every `hooked_sess.run`.
+    This callback is used internally by the trainer, you don't need to worry about it.
     """
 
     _chief_only = False
@@ -115,10 +114,9 @@ class MaintainStepCounter(Callback):
         # ensure it exists
         gs_var = get_global_step_var()
         with tf.name_scope(None):
-            with self.graph.colocate_with(gs_var):
-                self.gs_incr_op = tf.assign_add(
-                    gs_var, 1,
-                    name=GLOBAL_STEP_INCR_OP_NAME).op
+            self.gs_incr_op = tf.assign_add(
+                gs_var, 1,
+                name=GLOBAL_STEP_INCR_OP_NAME).op
         self._fetches = tf.train.SessionRunArgs(self.gs_incr_op)
 
     def _before_train(self):

@@ -3,15 +3,13 @@
 
 import tensorflow as tf
 
-from ..input_source import (
-    InputSource, FeedInput, QueueInput, StagingInput, DummyConstantInput)
+from ..input_source import DummyConstantInput, FeedfreeInput, FeedInput, InputSource, QueueInput, StagingInput
 from ..utils import logger
-
 from .config import TrainConfig
 from .tower import SingleCostTrainer
 from .trainers import SimpleTrainer
 
-__all__ = ['launch_train_with_config', 'apply_default_prefetch']
+__all__ = ['launch_train_with_config']
 
 
 def apply_default_prefetch(input_source_or_dataflow, trainer):
@@ -40,7 +38,8 @@ def apply_default_prefetch(input_source_or_dataflow, trainer):
             # seem to only improve on >1 GPUs
             assert not isinstance(trainer, SimpleTrainer)
 
-            if not isinstance(input, (StagingInput, DummyConstantInput)):
+            if isinstance(input, FeedfreeInput) and \
+               not isinstance(input, (StagingInput, DummyConstantInput)):
                 logger.info("Automatically applying StagingInput on the DataFlow.")
                 input = StagingInput(input)
     return input
@@ -49,13 +48,17 @@ def apply_default_prefetch(input_source_or_dataflow, trainer):
 def launch_train_with_config(config, trainer):
     """
     Train with a :class:`TrainConfig` and a :class:`Trainer`, to
-    present a simple training interface. It basically does the following
+    present the simple and old training interface. It basically does the following
     3 things (and you can easily do them by yourself if you need more control):
 
     1. Setup the input with automatic prefetching heuristics,
        from `config.data` or `config.dataflow`.
     2. Call `trainer.setup_graph` with the input as well as `config.model`.
     3. Call `trainer.train` with rest of the attributes of config.
+
+    See the `related tutorial
+    <https://tensorpack.readthedocs.io/tutorial/training-interface.html#with-modeldesc-and-trainconfig>`_
+    to learn more.
 
     Args:
         config (TrainConfig):
@@ -74,12 +77,14 @@ def launch_train_with_config(config, trainer):
     assert config.dataflow is not None or config.data is not None
 
     model = config.model
-    inputs_desc = model.get_inputs_desc()
     input = config.data or config.dataflow
     input = apply_default_prefetch(input, trainer)
 
+    # This is the only place where the `ModelDesc` abstraction is useful.
+    # We should gradually stay away from this unuseful abstraction.
+    # TowerFuncWrapper is a better abstraction (similar to tf.defun in the future)
     trainer.setup_graph(
-        inputs_desc, input,
+        model.get_inputs_desc(), input,
         model._build_graph_get_cost, model.get_optimizer)
     _check_unused_regularization()
     trainer.train_with_defaults(

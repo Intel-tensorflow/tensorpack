@@ -1,6 +1,7 @@
 
 import tensorflow as tf
 from tensorflow.contrib.graph_editor import get_backward_walk_ops
+
 from ..utils.argtools import graph_memoized
 
 """
@@ -51,7 +52,8 @@ def dependency_of_fetches(fetches, op):
     """
     try:
         from tensorflow.python.client.session import _FetchHandler as FetchHandler
-        handler = FetchHandler(tf.get_default_graph(), fetches, {})
+        # use the graph of the op, so that this function can be called without being under a default graph
+        handler = FetchHandler(op.graph, fetches, {})
         targets = tuple(handler.fetches() + handler.targets())
     except ImportError:
         if isinstance(fetches, list):

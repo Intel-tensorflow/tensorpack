@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
 # File: serialize.py
 
-import os
 import numpy as np
+import os
+from collections import defaultdict
 
-from ..utils.utils import get_tqdm
 from ..utils import logger
-from ..utils.serialize import dumps, loads
-
+from ..utils.compatible_serialize import dumps, loads
+from ..utils.develop import create_dummy_class  # noqa
+from ..utils.utils import get_tqdm
 from .base import DataFlow
-from .format import LMDBData
-from .common import MapData, FixedSizeData
-from .raw import DataFromList, DataFromGenerator
+from .common import FixedSizeData, MapData
+from .format import HDF5Data, LMDBData
+from .raw import DataFromGenerator, DataFromList
 
-__all__ = ['LMDBSerializer', 'NumpySerializer', 'TFRecordSerializer']
+__all__ = ['LMDBSerializer', 'NumpySerializer', 'TFRecordSerializer', 'HDF5Serializer']
 
 
 def _reset_df_and_get_size(df):
     df.reset_state()
     try:
-        sz = df.size()
+        sz = len(df)
     except NotImplementedError:
         sz = 0
     return sz
@@ -30,7 +31,7 @@ class LMDBSerializer():
     Serialize a Dataflow to a lmdb database, where the keys are indices and values
     are serialized datapoints.
 
-    You will need to `pip install lmdb` to use it.
+    You will need to ``pip install lmdb`` to use it.
     """
     @staticmethod
     def save(df, path, write_frequency=5000):
@@ -45,7 +46,7 @@ class LMDBSerializer():
         if isdir:
             assert not os.path.isfile(os.path.join(path, 'data.mdb')), "LMDB file exists!"
         else:
-            assert not os.path.isfile(path), "LMDB file exists!"
+            assert not os.path.isfile(path), "LMDB file {} exists!".format(path)
         db = lmdb.open(path, subdir=isdir,
                        map_size=1099511627776 * 2, readonly=False,
                        meminit=False, map_async=True)    # need sync() at the end
@@ -56,7 +57,7 @@ class LMDBSerializer():
             # LMDB transaction is not exception-safe!
             # although it has a context manager interface
             txn = db.begin(write=True)
-            for idx, dp in enumerate(df.get_data()):
+            for idx, dp in enumerate(df):
                 txn.put(u'{:08}'.format(idx).encode('ascii'), dumps(dp))
                 pbar.update()
                 if (idx + 1) % write_frequency == 0:
@@ -87,8 +88,9 @@ class NumpySerializer():
     """
     Serialize the entire dataflow to a npz dict.
     Note that this would have to store the entire dataflow in memory,
-    and is also >10x slower than the other serializers.
+    and is also >10x slower than LMDB/TFRecord serializers.
     """
+
     @staticmethod
     def save(df, path):
         """
@@ -99,10 +101,10 @@ class NumpySerializer():
         buffer = []
         size = _reset_df_and_get_size(df)
         with get_tqdm(total=size) as pbar:
-            for dp in df.get_data():
+            for dp in df:
                 buffer.append(dp)
                 pbar.update()
-        np.savez_compressed(path, buffer=buffer)
+        np.savez_compressed(path, buffer=np.asarray(buffer, dtype=np.object))
 
     @staticmethod
     def load(path, shuffle=True):
@@ -124,7 +126,7 @@ class TFRecordSerializer():
             df (DataFlow): the DataFlow to serialize.
             path (str): output tfrecord file.
         """
-        if os.environ.get('TENSORPACK_SERIALIZE', None) == 'msgpack':
+        if os.environ.get('TENSORPACK_COMPATIBLE_SERIALIZE', 'msgpack') == 'msgpack':
             def _dumps(dp):
                 return dumps(dp)
         else:
@@ -133,7 +135,7 @@ class TFRecordSerializer():
 
         size = _reset_df_and_get_size(df)
         with tf.python_io.TFRecordWriter(path) as writer, get_tqdm(total=size) as pbar:
-            for dp in df.get_data():
+            for dp in df:
                 writer.write(_dumps(dp))
                 pbar.update()
 
@@ -141,7 +143,7 @@ class TFRecordSerializer():
     def load(path, size=None):
         """
         Args:
-            size (int): total number of records. If not provided, the returned dataflow will have no `size()`.
+            size (int): total number of records. If not provided, the returned dataflow will have no `__len__()`.
                 It's needed because this metadata is not stored in the TFRecord file.
         """
         gen = tf.python_io.tf_record_iterator(path)
@@ -152,7 +154,47 @@ class TFRecordSerializer():
         return ds
 
 
-from ..utils.develop import create_dummy_class   # noqa
+class HDF5Serializer():
+    """
+    Write datapoints to a HDF5 file.
+
+    Note that HDF5 files are in fact not very performant and currently do not support lazy loading.
+    It's better to use :class:`LMDBSerializer`.
+    """
+    @staticmethod
+    def save(df, path, data_paths):
+        """
+        Args:
+            df (DataFlow): the DataFlow to serialize.
+            path (str): output hdf5 file.
+            data_paths (list[str]): list of h5 paths. It should have the same
+                length as each datapoint, and each path should correspond to one
+                component of the datapoint.
+        """
+        size = _reset_df_and_get_size(df)
+        buffer = defaultdict(list)
+
+        with get_tqdm(total=size) as pbar:
+            for dp in df:
+                assert len(dp) == len(data_paths), "Datapoint has {} components!".format(len(dp))
+                for k, el in zip(data_paths, dp):
+                    buffer[k].append(el)
+                pbar.update()
+
+        with h5py.File(path, 'w') as hf, get_tqdm(total=len(data_paths)) as pbar:
+            for data_path in data_paths:
+                hf.create_dataset(data_path, data=buffer[data_path])
+                pbar.update()
+
+    @staticmethod
+    def load(path, data_paths, shuffle=True):
+        """
+        Args:
+            data_paths (list): list of h5 paths to be zipped.
+        """
+        return HDF5Data(path, data_paths, shuffle)
+
+
 try:
     import lmdb
 except ImportError:
@@ -162,6 +204,11 @@ try:
     import tensorflow as tf
 except ImportError:
     TFRecordSerializer = create_dummy_class('TFRecordSerializer', 'tensorflow')   # noqa
+
+try:
+    import h5py
+except ImportError:
+    HDF5Serializer = create_dummy_class('HDF5Serializer', 'h5py')   # noqa
 
 
 if __name__ == '__main__':
@@ -174,7 +221,7 @@ if __name__ == '__main__':
     print(time.time())
     df = TFRecordSerializer.load('out.tfrecords', size=1000)
     df.reset_state()
-    for idx, dp in enumerate(df.get_data()):
+    for idx, dp in enumerate(df):
         pass
     print("TF Finished, ", idx)
     print(time.time())
@@ -183,7 +230,7 @@ if __name__ == '__main__':
     print(time.time())
     df = LMDBSerializer.load('out.lmdb')
     df.reset_state()
-    for idx, dp in enumerate(df.get_data()):
+    for idx, dp in enumerate(df):
         pass
     print("LMDB Finished, ", idx)
     print(time.time())
@@ -192,7 +239,17 @@ if __name__ == '__main__':
     print(time.time())
     df = NumpySerializer.load('out.npz')
     df.reset_state()
-    for idx, dp in enumerate(df.get_data()):
+    for idx, dp in enumerate(df):
         pass
     print("Numpy Finished, ", idx)
+    print(time.time())
+
+    paths = ['p1', 'p2']
+    HDF5Serializer.save(ds, 'out.h5', paths)
+    print(time.time())
+    df = HDF5Serializer.load('out.h5', paths)
+    df.reset_state()
+    for idx, dp in enumerate(df):
+        pass
+    print("HDF5 Finished, ", idx)
     print(time.time())

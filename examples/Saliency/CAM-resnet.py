@@ -2,43 +2,32 @@
 # -*- coding: utf-8 -*-
 # File: CAM-resnet.py
 
-import cv2
-import sys
 import argparse
+import multiprocessing
 import numpy as np
 import os
-import multiprocessing
-
-
+import sys
+import cv2
 import tensorflow as tf
+
 from tensorpack import *
 from tensorpack.dataflow import dataset
-from tensorpack.tfutils import optimizer, gradproc
-from tensorpack.tfutils.symbolic_functions import *
+from tensorpack.tfutils import gradproc, optimizer
 from tensorpack.tfutils.summary import *
-from tensorpack.utils.gpu import get_num_gpu
+from tensorpack.tfutils.symbolic_functions import *
 from tensorpack.utils import viz
+from tensorpack.utils.gpu import get_num_gpu
 
-from imagenet_utils import (
-    fbresnet_augmentor, image_preprocess, compute_loss_and_error)
-from resnet_model import (
-    preresnet_basicblock, preresnet_group)
-
+from imagenet_utils import ImageNetModel, fbresnet_augmentor
+from resnet_model import preresnet_basicblock, preresnet_group
 
 TOTAL_BATCH_SIZE = 256
-INPUT_SHAPE = 224
 DEPTH = None
 
 
-class Model(ModelDesc):
-    def inputs(self):
-        return [tf.placeholder(tf.uint8, [None, INPUT_SHAPE, INPUT_SHAPE, 3], 'input'),
-                tf.placeholder(tf.int32, [None], 'label')]
+class Model(ImageNetModel):
 
-    def build_graph(self, image, label):
-        image = image_preprocess(image, bgr=True)
-        image = tf.transpose(image, [0, 3, 1, 2])
-
+    def get_logits(self, image):
         cfg = {
             18: ([2, 2, 2, 2], preresnet_basicblock),
             34: ([3, 4, 6, 3], preresnet_basicblock),
@@ -58,11 +47,7 @@ class Model(ModelDesc):
             print(convmaps)
             convmaps = GlobalAvgPooling('gap', convmaps)
             logits = FullyConnected('linearnew', convmaps, 1000)
-
-        loss = compute_loss_and_error(logits, label)
-        wd_cost = regularize_cost('.*/W', l2_regularizer(1e-4), name='l2_regularize_loss')
-        add_moving_summary(loss, wd_cost)
-        return tf.add_n([loss, wd_cost], name='cost')
+        return logits
 
     def optimizer(self):
         lr = tf.get_variable('learning_rate', initializer=0.1, trainable=False)
@@ -150,7 +135,7 @@ if __name__ == '__main__':
     parser.add_argument('--data', help='ILSVRC dataset dir')
     parser.add_argument('--depth', type=int, default=18)
     parser.add_argument('--load', help='load model')
-    parser.add_argument('--cam', action='store_true')
+    parser.add_argument('--cam', action='store_true', help='run visualization')
     args = parser.parse_args()
 
     DEPTH = args.depth

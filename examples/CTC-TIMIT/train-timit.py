@@ -3,17 +3,17 @@
 # File: train-timit.py
 # Author: Yuxin Wu
 
-import os
 import argparse
+import os
+import tensorflow as tf
 from six.moves import range
 
-
 from tensorpack import *
-from tensorpack.tfutils.gradproc import SummaryGradient, GlobalNormClip
+from tensorpack.tfutils.gradproc import GlobalNormClip, SummaryGradient
 from tensorpack.utils import serialize
-import tensorflow as tf
 
 from timitdata import TIMITBatch
+
 rnn = tf.contrib.rnn
 
 
@@ -59,11 +59,11 @@ class Model(ModelDesc):
         isTrain = get_current_tower_context().is_training
         if isTrain:
             # beam search is too slow to run in training
-            predictions = tf.to_int32(
-                tf.nn.ctc_greedy_decoder(logits, seqlen)[0][0])
+            predictions = tf.cast(
+                tf.nn.ctc_greedy_decoder(logits, seqlen)[0][0], tf.int32)
         else:
-            predictions = tf.to_int32(
-                tf.nn.ctc_beam_search_decoder(logits, seqlen)[0][0])
+            predictions = tf.cast(
+                tf.nn.ctc_beam_search_decoder(logits, seqlen)[0][0], tf.int32)
         err = tf.edit_distance(predictions, label, normalize=True)
         err.set_shape([None])
         err = tf.reduce_mean(err, name='error')

@@ -2,16 +2,15 @@
 # File: utils.py
 
 
+import inspect
+import numpy as np
 import os
 import sys
 from contextlib import contextmanager
-import inspect
 from datetime import datetime, timedelta
 from tqdm import tqdm
-import numpy as np
 
 from . import logger
-
 
 __all__ = ['change_env',
            'get_rng',
@@ -180,8 +179,7 @@ def _pick_tqdm_interval(file):
                 return 15
 
         if 'OMPI_COMM_WORLD_SIZE' in os.environ:
-            if int(os.environ['OMPI_COMM_WORLD_SIZE']) > 1:
-                return 60
+            return 60
 
         # If not a tty, don't refresh progress bar that often
         return 180
@@ -214,7 +212,7 @@ def get_tqdm_kwargs(**kwargs):
     return default
 
 
-def get_tqdm(**kwargs):
-    """ Similar to :func:`get_tqdm_kwargs`,
-    but returns the tqdm object directly. """
-    return tqdm(**get_tqdm_kwargs(**kwargs))
+def get_tqdm(*args, **kwargs):
+    """ Similar to :func:`tqdm.tqdm()`,
+    but use tensorpack's default options to have consistent style. """
+    return tqdm(*args, **get_tqdm_kwargs(**kwargs))

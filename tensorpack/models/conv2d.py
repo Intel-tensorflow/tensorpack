@@ -3,10 +3,11 @@
 
 
 import tensorflow as tf
-from .common import layer_register, VariableHolder
-from ..tfutils.common import get_tf_version_number
-from ..utils.argtools import shape2d, shape4d, get_data_format
-from .tflayer import rename_get_variable, convert_to_tflayer_args
+
+from ..tfutils.common import get_tf_version_tuple
+from ..utils.argtools import get_data_format, shape2d, shape4d, log_once
+from .common import VariableHolder, layer_register
+from .tflayer import convert_to_tflayer_args, rename_get_variable
 
 __all__ = ['Conv2D', 'Deconv2D', 'Conv2DTranspose']
 
@@ -29,7 +30,7 @@ def Conv2D(
         dilation_rate=(1, 1),
         activation=None,
         use_bias=True,
-        kernel_initializer=tf.contrib.layers.variance_scaling_initializer(2.0),
+        kernel_initializer=None,
         bias_initializer=tf.zeros_initializer(),
         kernel_regularizer=None,
         bias_regularizer=None,
@@ -41,13 +42,18 @@ def Conv2D(
 
     1. Default kernel initializer is variance_scaling_initializer(2.0).
     2. Default padding is 'same'.
-    3. Support 'split' argument to do group conv.
+    3. Support 'split' argument to do group conv. Note that this is not efficient.
 
     Variable Names:
 
     * ``W``: weights
     * ``b``: bias
     """
+    if kernel_initializer is None:
+        if get_tf_version_tuple() <= (1, 12):
+            kernel_initializer = tf.contrib.layers.variance_scaling_initializer(2.0)
+        else:
+            kernel_initializer = tf.keras.initializers.VarianceScaling(2.0, distribution='untruncated_normal')
     if split == 1:
         with rename_get_variable({'kernel': 'W', 'bias': 'b'}):
             layer = tf.layers.Conv2D(
@@ -74,7 +80,7 @@ def Conv2D(
 
     else:
         # group conv implementation
-        data_format = get_data_format(data_format, tfmode=False)
+        data_format = get_data_format(data_format, keras_mode=False)
         in_shape = inputs.get_shape().as_list()
         channel_axis = 3 if data_format == 'NHWC' else 1
         in_channel = in_shape[channel_axis]
@@ -86,14 +92,14 @@ def Conv2D(
 
         out_channel = filters
         assert out_channel % split == 0
-        assert dilation_rate == (1, 1) or get_tf_version_number() >= 1.5, 'TF>=1.5 required for group dilated conv'
+        assert dilation_rate == (1, 1) or get_tf_version_tuple() >= (1, 5), 'TF>=1.5 required for group dilated conv'
 
         kernel_shape = shape2d(kernel_size)
         filter_shape = kernel_shape + [in_channel / split, out_channel]
         stride = shape4d(strides, data_format=data_format)
 
         kwargs = dict(data_format=data_format)
-        if get_tf_version_number() >= 1.5:
+        if get_tf_version_tuple() >= (1, 5):
             kwargs['dilations'] = shape4d(dilation_rate, data_format=data_format)
 
         W = tf.get_variable(
@@ -102,11 +108,22 @@ def Conv2D(
         if use_bias:
             b = tf.get_variable('b', [out_channel], initializer=bias_initializer)
 
-        inputs = tf.split(inputs, split, channel_axis)
-        kernels = tf.split(W, split, 3)
-        outputs = [tf.nn.conv2d(i, k, stride, padding.upper(), **kwargs)
-                   for i, k in zip(inputs, kernels)]
-        conv = tf.concat(outputs, channel_axis)
+        conv = None
+        if get_tf_version_tuple() >= (1, 13):
+            try:
+                conv = tf.nn.conv2d(inputs, W, stride, padding.upper(), **kwargs)
+            except ValueError:
+                conv = None
+                log_once("CUDNN group convolution support is only available with "
+                         "https://github.com/tensorflow/tensorflow/pull/25818 . "
+                         "Will fall back to a loop-based slow implementation instead!", 'warn')
+        if conv is None:
+            inputs = tf.split(inputs, split, channel_axis)
+            kernels = tf.split(W, split, 3)
+            outputs = [tf.nn.conv2d(i, k, stride, padding.upper(), **kwargs)
+                       for i, k in zip(inputs, kernels)]
+            conv = tf.concat(outputs, channel_axis)
+
         if activation is None:
             activation = tf.identity
         ret = activation(tf.nn.bias_add(conv, b, data_format=data_format) if use_bias else conv, name='output')
@@ -134,7 +151,7 @@ def Conv2DTranspose(
         data_format='channels_last',
         activation=None,
         use_bias=True,
-        kernel_initializer=tf.contrib.layers.variance_scaling_initializer(2.0),
+        kernel_initializer=None,
         bias_initializer=tf.zeros_initializer(),
         kernel_regularizer=None,
         bias_regularizer=None,
@@ -151,28 +168,77 @@ def Conv2DTranspose(
     * ``W``: weights
     * ``b``: bias
     """
+    if kernel_initializer is None:
+        if get_tf_version_tuple() <= (1, 12):
+            kernel_initializer = tf.contrib.layers.variance_scaling_initializer(2.0)
+        else:
+            kernel_initializer = tf.keras.initializers.VarianceScaling(2.0, distribution='untruncated_normal')
 
-    with rename_get_variable({'kernel': 'W', 'bias': 'b'}):
-        layer = tf.layers.Conv2DTranspose(
-            filters,
-            kernel_size,
-            strides=strides,
-            padding=padding,
-            data_format=data_format,
-            activation=activation,
-            use_bias=use_bias,
-            kernel_initializer=kernel_initializer,
-            bias_initializer=bias_initializer,
-            kernel_regularizer=kernel_regularizer,
-            bias_regularizer=bias_regularizer,
-            activity_regularizer=activity_regularizer,
-            _reuse=tf.get_variable_scope().reuse)
-        ret = layer.apply(inputs, scope=tf.get_variable_scope())
-        ret = tf.identity(ret, name='output')
+    if get_tf_version_tuple() <= (1, 12):
+        with rename_get_variable({'kernel': 'W', 'bias': 'b'}):
+            layer = tf.layers.Conv2DTranspose(
+                filters,
+                kernel_size,
+                strides=strides,
+                padding=padding,
+                data_format=data_format,
+                activation=activation,
+                use_bias=use_bias,
+                kernel_initializer=kernel_initializer,
+                bias_initializer=bias_initializer,
+                kernel_regularizer=kernel_regularizer,
+                bias_regularizer=bias_regularizer,
+                activity_regularizer=activity_regularizer,
+                _reuse=tf.get_variable_scope().reuse)
+            ret = layer.apply(inputs, scope=tf.get_variable_scope())
+            ret = tf.identity(ret, name='output')
+        ret.variables = VariableHolder(W=layer.kernel)
+        if use_bias:
+            ret.variables.b = layer.bias
+    else:
+        # Our own implementation, to avoid Keras bugs. https://github.com/tensorflow/tensorflow/issues/25946
+        assert kernel_regularizer is None and bias_regularizer is None and activity_regularizer is None, \
+            "Unsupported arguments due to Keras bug in TensorFlow 1.13"
+        data_format = get_data_format(data_format, keras_mode=False)
+        shape_dyn = tf.shape(inputs)
+        strides2d = shape2d(strides)
+        channels_in = inputs.shape[1 if data_format == 'NCHW' else 3]
+        if data_format == 'NCHW':
+            channels_in = inputs.shape[1]
+            out_shape_dyn = tf.stack(
+                [shape_dyn[0], filters,
+                 shape_dyn[2] * strides2d[0],
+                 shape_dyn[3] * strides2d[1]])
+            out_shape3_sta = [filters,
+                              None if inputs.shape[2] is None else inputs.shape[2] * strides2d[0],
+                              None if inputs.shape[3] is None else inputs.shape[3] * strides2d[1]]
+        else:
+            channels_in = inputs.shape[-1]
+            out_shape_dyn = tf.stack(
+                [shape_dyn[0],
+                 shape_dyn[1] * strides2d[0],
+                 shape_dyn[2] * strides2d[1],
+                 filters])
+            out_shape3_sta = [None if inputs.shape[1] is None else inputs.shape[1] * strides2d[0],
+                              None if inputs.shape[2] is None else inputs.shape[2] * strides2d[1],
+                              filters]
 
-    ret.variables = VariableHolder(W=layer.kernel)
-    if use_bias:
-        ret.variables.b = layer.bias
+        kernel_shape = shape2d(kernel_size)
+        W = tf.get_variable('W', kernel_shape + [filters, channels_in], initializer=kernel_initializer)
+        if use_bias:
+            b = tf.get_variable('b', [filters], initializer=bias_initializer)
+        conv = tf.nn.conv2d_transpose(
+            inputs, W, out_shape_dyn,
+            shape4d(strides, data_format=data_format),
+            padding=padding.upper(),
+            data_format=data_format)
+        conv.set_shape(tf.TensorShape([None] + out_shape3_sta))
+        ret = activation(tf.nn.bias_add(conv, b, data_format=data_format) if use_bias else conv, name='output')
+
+        ret.variables = VariableHolder(W=W)
+        if use_bias:
+            ret.variables.b = b
+
     return ret
 
 

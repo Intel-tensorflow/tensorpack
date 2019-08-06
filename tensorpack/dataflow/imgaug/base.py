@@ -1,18 +1,25 @@
 # -*- coding: utf-8 -*-
 # File: base.py
 
-
+import os
 import inspect
 import pprint
-from abc import abstractmethod, ABCMeta
+from abc import ABCMeta, abstractmethod
 import six
 from six.moves import zip
+import weakref
 
-from ...utils.utils import get_rng
 from ...utils.argtools import log_once
+from ...utils.utils import get_rng
 from ..image import check_dtype
 
 __all__ = ['Augmentor', 'ImageAugmentor', 'AugmentorList']
+
+
+def _reset_augmentor_after_fork(aug_ref):
+    aug = aug_ref()
+    if aug:
+        aug.reset_state()
 
 
 @six.add_metaclass(ABCMeta)
@@ -22,28 +29,56 @@ class Augmentor(object):
     def __init__(self):
         self.reset_state()
 
+        # only available on Unix after Python 3.7
+        if hasattr(os, 'register_at_fork'):
+            os.register_at_fork(
+                after_in_child=lambda: _reset_augmentor_after_fork(weakref.ref(self)))
+
     def _init(self, params=None):
         if params:
             for k, v in params.items():
-                if k != 'self':
+                if k != 'self' and not k.startswith('_'):
                     setattr(self, k, v)
 
     def reset_state(self):
-        """ reset rng and other state """
+        """
+        Reset rng and other state of the augmentor.
+
+        Similar to :meth:`DataFlow.reset_state`, the caller of Augmentor
+        is responsible for calling this method (once or more times) in the **process that uses the augmentor**
+        before using it.
+
+        If you use tensorpack's built-in augmentation dataflow (:class:`AugmentImageComponent`, etc),
+        this method will be called in the dataflow's own `reset_state` method.
+
+        If you use Python≥3.7 on Unix, this method will be automatically called after fork,
+        and you do not need to bother calling it.
+        """
         self.rng = get_rng(self)
 
     def augment(self, d):
         """
         Perform augmentation on the data.
+
+        Args:
+            d: input data
+
+        Returns:
+            augmented data
         """
         d, params = self._augment_return_params(d)
         return d
 
     def augment_return_params(self, d):
         """
+        Augment the data and return the augmentation parameters.
+        If the augmentation is non-deterministic (random),
+        the returned parameters can be used to augment another data with the identical transformation.
+        This can be used for, e.g. augmenting image, masks, keypoints altogether with the
+        same transformation.
+
         Returns:
-            augmented data
-            augmentation params
+            (augmented data, augmentation params)
         """
         return self._augment_return_params(d)
 
@@ -53,6 +88,19 @@ class Augmentor(object):
         """
         prms = self._get_augment_params(d)
         return (self._augment(d, prms), prms)
+
+    def augment_with_params(self, d, param):
+        """
+        Augment the data with the given param.
+
+        Args:
+            d: input data
+            param: augmentation params returned by :meth:`augment_return_params`
+
+        Returns:
+            augmented data
+        """
+        return self._augment(d, param)
 
     @abstractmethod
     def _augment(self, d, param):
@@ -113,26 +161,29 @@ class ImageAugmentor(Augmentor):
     floating point images in range [0, 1] or [0, 255].
     """
     def augment_coords(self, coords, param):
-        return self._augment_coords(coords, param)
-
-    def _augment_coords(self, coords, param):
         """
         Augment the coordinates given the param.
-        By default, keeps coordinates unchanged.
-        If a subclass changes coordinates but couldn't implement this method,
+
+        By default, an augmentor keeps coordinates unchanged.
+        If a subclass of :class:`ImageAugmentor` changes coordinates but couldn't implement this method,
         it should ``raise NotImplementedError()``.
 
         Args:
-            coords: Nx2 floating point nparray where each row is (x, y)
+            coords: Nx2 floating point numpy array where each row is (x, y)
+            param: augmentation params returned by :meth:`augment_return_params`
+
         Returns:
             new coords
         """
+        return self._augment_coords(coords, param)
+
+    def _augment_coords(self, coords, param):
         return coords
 
 
 class AugmentorList(ImageAugmentor):
     """
-    Augment by a list of augmentors
+    Augment an image by a list of augmentors
     """
 
     def __init__(self, augmentors):
@@ -140,6 +191,7 @@ class AugmentorList(ImageAugmentor):
         Args:
             augmentors (list): list of :class:`ImageAugmentor` instance to be applied.
         """
+        assert isinstance(augmentors, (list, tuple)), augmentors
         self.augmentors = augmentors
         super(AugmentorList, self).__init__()
 
@@ -171,5 +223,6 @@ class AugmentorList(ImageAugmentor):
 
     def reset_state(self):
         """ Will reset state of each augmentor """
+        super(AugmentorList, self).reset_state()
         for a in self.augmentors:
             a.reset_state()

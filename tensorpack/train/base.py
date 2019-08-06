@@ -1,25 +1,23 @@
 # -*- coding: utf-8 -*-
 # File: base.py
 
-import tensorflow as tf
-import weakref
-import time
-from six.moves import range
-import six
 import copy
+import time
+import weakref
+import six
+import tensorflow as tf
+from six.moves import range
 
-from ..callbacks import (
-    Callback, Callbacks, Monitors, TrainingMonitor)
-from ..utils import logger
-from ..utils.utils import humanize_time_delta
-from ..utils.argtools import call_only_once
+from ..callbacks import Callback, Callbacks, Monitors, MonitorBase
+from ..callbacks.steps import MaintainStepCounter
 from ..tfutils import get_global_step_value
 from ..tfutils.model_utils import describe_trainable_vars
-from ..tfutils.sessinit import SessionInit, JustCurrentSession
-from ..tfutils.sesscreate import ReuseSessionCreator, NewSessionCreator
-from ..callbacks.steps import MaintainStepCounter
-
-from .config import TrainConfig, DEFAULT_MONITORS, DEFAULT_CALLBACKS
+from ..tfutils.sesscreate import NewSessionCreator, ReuseSessionCreator
+from ..tfutils.sessinit import JustCurrentSession, SessionInit
+from ..utils import logger
+from ..utils.argtools import call_only_once
+from ..utils.utils import humanize_time_delta
+from .config import DEFAULT_CALLBACKS, DEFAULT_MONITORS, TrainConfig
 
 __all__ = ['StopTraining', 'Trainer']
 
@@ -48,7 +46,8 @@ class TrainLoop(object):
         self.starting_epoch = int(starting_epoch)
         self.max_epoch = int(max_epoch)
         self.steps_per_epoch = int(steps_per_epoch)
-        assert self.steps_per_epoch > 0 and self.max_epoch > 0
+        # Allow empty epoch (no steps), if we want to run the callbacks only.
+        assert self.steps_per_epoch >= 0 and self.max_epoch >= 0
 
         self._epoch_num = starting_epoch - 1
 
@@ -98,6 +97,41 @@ class Trainer(object):
     """
     Whether this process is the chief worker in distributed training.
     Certain callbacks will only be run by chief worker.
+    """
+
+    sess = None
+    """
+    The ``tf.Session`` object the trainer is using.
+    Available after :meth:`initialize()`.
+
+    Using ``trainer.sess.run`` to evaluate tensors that depend on the training
+    ``InputSource`` may have unexpected effect:
+
+    For example, if you use ``trainer.sess.run`` to evaluate a tensor that depends on the
+    inputs coming from a ``StagingArea``,
+    it will take a datapoint from the ``StagingArea``, making the ``StagingArea`` empty, and as a result
+    make the training hang.
+    """
+
+    hooked_sess = None
+    """
+    The ``tf.train.MonitoredSession`` object the trainer is using.
+    It contains all the ``before_run/after_run`` hooks the callbacks have registered.
+    It is used for running the training iterations.
+    Available after :meth:`initialize()`.
+
+    Note that using ``hooked_sess.run`` will evaluate all the hooks,
+    just like running a training iteration. It may do the following:
+
+    1. Take a datapoint from the InputSource
+    2. Increase the global_step
+    3. Evaluate some summaries
+
+    Typically you __should not__ use ``hooked_sess.run`` in callbacks,
+    because it is for the "training iteration". If you just want to evaluate
+    some tensors, use ``sess.run`` if the tensors does not depend on the inputs,
+    or more generally, use `before_run/after_run` to evaluate the tensors **along with**
+    the training iterations.
     """
 
     def __init__(self):
@@ -152,7 +186,7 @@ class Trainer(object):
 
         Args:
             callbacks ([Callback]):
-            monitors ([TrainingMonitor]):
+            monitors ([MonitorBase]):
         """
         assert isinstance(callbacks, list), callbacks
         assert isinstance(monitors, list), monitors
@@ -162,7 +196,7 @@ class Trainer(object):
         for cb in callbacks:
             self.register_callback(cb)
         for cb in self._callbacks:
-            assert not isinstance(cb, TrainingMonitor), "Monitor cannot be pre-registered for now!"
+            assert not isinstance(cb, MonitorBase), "Monitor cannot be pre-registered for now!"
         registered_monitors = []
         for m in monitors:
             if self.register_callback(m):
@@ -178,8 +212,11 @@ class Trainer(object):
     @call_only_once
     def initialize(self, session_creator, session_init):
         """
-        Initialize self.sess and self.hooked_sess.
-        Must be called after callbacks are setup.
+        Create the session and set `self.sess`.
+        Call `self.initiailize_hooks()`
+        Finalize the graph.
+
+        It must be called after callbacks are setup.
 
         Args:
             session_creator (tf.train.SessionCreator):
@@ -207,7 +244,7 @@ class Trainer(object):
     @call_only_once
     def initialize_hooks(self):
         """
-        Create SessionRunHooks for all callbacks, and hook it onto self.sess.
+        Create SessionRunHooks for all callbacks, and hook it onto `self.sess` to create `self.hooked_sess`.
 
         A new trainer may override this method to create multiple groups of hooks,
         which can be useful when the training is not done by a single `train_op`.
